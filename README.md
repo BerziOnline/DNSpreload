@@ -103,5 +103,6 @@ Dazu bindet man einen ExecStartPost an den unbound-service selbst. Verwendet wir
 Da in den top-1mio Domains viele lokale/individuelle Domains fehlen werden, die es nicht in die weltweite Rangliste geschafft haben, bietet es sich an diese Domains in das Pre-Caching mit aufzunehmen. Das Skript ist so geschrieben, dass es diese History mit hinzuzieht, sobald sie abgelegt ist. 
 Es ist wichtig zu wissen, dass hier nicht zwingend eine regelmäßige Aktualisierung von Nöten ist. Es ist bereits ein Gewinn, wenn dies überhaupt auch nur einmal gedumped und mit abgelegt wird. Natürlich kann man das beliebig oft aktualisieren oder bei Bedarf auch automatisieren.
 
-Dazu dient das Skript `firefoxDNSdump.sh`, welches natürlich auf einem Client ausgeführt werden sollte, der den Firefox aktiv nutzt.
-Da ich selbst reiner Linux-Nutzer bin, ist es derzeit auch nur dafür ausgelegt. Es ist das Paket **sqlite3** nötig. Vor dem Start muss der Pfad zum Profil des Browsers angepasst werden und der `scp`-Befehl am Ende des Skriptes, welcher das Ergebnis des Dumps dann in das Verzeichnis des DNS-Servers ablegt, wo auch die ganzen anderen abgelegten Domains liegen.
+Dazu dient das Skript `firefoxDNSdump.sh`, welches auf einem Client ausgeführt werden sollte, der den Firefox aktiv nutzt, um überhaupt erst eine sinnvolle History dumpen zu können.
+Da ich selbst kein Windows-System besitze, ist es derzeit nur für Linux-Clients ausgelegt, sollte aber auch für Windows-Systeme anpassbar sein. 
+Es ist das Paket **sqlite3** nötig. Vor dem Start muss in dem Skript der Pfad zum Profil des Browsers angepasst werden und der `scp`-Befehl am Ende des Skriptes (dieser kopiert den Dump zum DNS-Server).
