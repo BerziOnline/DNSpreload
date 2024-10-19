@@ -2,7 +2,7 @@
 *Being smarter, being faster, being prepared. Preload your unbound!*
 
 ## Was das?
-DNSpreload dient dem Pre-Caching von Domains.
+DNSpreload dient dem Pre-Caching von Domains für einen unbound-Server.
 
 ### Warum?
 Wer im eigenen Netzwerk einen DNS-Server betreibt, um bspw. einen Ad-Blocker zu nutzen oder seine Privatsphäre zu erhöhen, der steht vor der Entscheidung für seinen eigenen DNS-Server einen weiteren Upstream-DNS zu nutzen oder diesen direkt per iterativen Anfragen bei den Root- bzw. TLD-Servern anfragen zu lassen. 
@@ -21,6 +21,9 @@ Aus dem Netzwerk heraus werden täglich tausende Domains nahezu willkürlich vor
 Das Script zieht sich einen Dump von Top-Domains in Deutschland, sowie weiteren TLDs und bietet die Möglichkeit dies auch durch eine persönliche Browser-History zu ergänzen. Es werden die 1mio meistgenutzten Domains gezogen, um im Anschluss beliebige Anteile davon im unbound-cache vorzuladen.
 
 Das Script kann von jedem Client im Netz mit funktionierender Bash ausgeführt werden, es empfiehlt sich jedoch deutlich das Script auf dem unbound-Server selbst auszuführen, um die Flut an DNS-Abfragen lokal zu initiieren und nicht unnötigerweise durch das lokale Netz zwischen Client & Server zu senden.
+
+### Disclaimer
+Als reiner Netzwerktechniker habe ich mir über die "Sache" selbst Gedanken gemacht und diese gelöst. In puncto Skripting/Programmierung gibt es mit ziemlicher Sicherheit elegantere und vor allem anwenderfreundlichere Lösungen in der Umsetzung. Seht es mir nach, dass das ein egoistisch angelegtes Skript ist, welches auf mehrfache Anfrage von mir hier nun in genau dieser Version veröffentlicht wird.
 
 ## HowTo
 ### 1. Variablen anpassen
@@ -72,9 +75,24 @@ crontab -e
 30 4 * * * /home/pi/Scripts/unbound-cache-dumping/preload_topdomains.sh 2
 ```
 
+### 4. Cache von unbound dumpen und laden
+Damit der angewachsene Cache von unbound nicht verloren geht, wenn der Server oder Service neugestartet wird, bietet es sich an diesen regelmäßig zu dumpen und beim Start des Services direkt zu laden.
+
+#### Dumpen
+Dazu dient das Skript `dumb_cach_from_unbound.sh`. Bitte die Variablen im oberen Abschnitt anpassen.
+
+Das Skript könnte bspw. alle 3 Stunden als Cronjob ausgeführt werden:
+```
+crontab -e
+# Alle 3 Stunden den Cache von Unbound als Dump ablegen, um diesen beim Service-Start wieder herein zu laden
+0 */3 * * * /home/pi/Scripts/unbound-cache-dumping/dump_cache_from_unbound.sh
+```
+
+#### Cache-Dump bei jedem Unbound-Start automatisiert laden
+Dazu bindet man einen ExecStartPost an den unbound-service selbst. Verwendet wird vom Service das Script `load_cache_on_startup.sh`.
+1. Skript `load_cache_on_startup.sh` in beliebiges Verzeichnis legen (es bietet sich der Pfad der anderen Skripte dieser Gesamtlösung hier an)
+2. Eine Kopie von /lib/systemd/system/unbound.service nach /etc/systemd/system/unbound.service anlegen und um ExecStartPost=/pfad/zum/load_cach_on_startup.sh ergänzen, um dieses Skript bei jedem Start von Unbound im Anschluss automatisiert auszuführen
 
 
-### 3. Coming soom
-- Crons
-- unbound cache dumb
+### Coming soom
 - Browser history
