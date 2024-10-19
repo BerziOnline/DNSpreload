@@ -28,7 +28,7 @@ Hilfreich ist außerdem zur Kontrolle des Cache-Aufwuchses bspw:
 `sudo unbound-control dump_cache | wc -l`
 
 ### Disclaimer
-Als reiner Netzwerktechniker habe ich mir über die "Sache" selbst Gedanken gemacht und diese gelöst. In puncto Skripting/Programmierung gibt es mit ziemlicher Sicherheit elegantere und vor allem anwenderfreundlichere Lösungen in der Umsetzung. Seht es mir nach, dass das ein egoistisch angelegtes Skript ist, welches auf mehrfache Anfrage von mir hier nun in genau dieser Version veröffentlicht wird.
+Als reiner Netzwerktechniker habe ich mir über **die Sache selbst** Gedanken gemacht und diese gelöst. In puncto Skripting/Programmierung gibt es mit ziemlicher Sicherheit elegantere und vor allem anwenderfreundlichere Lösungen in der Umsetzung. Seht es mir nach, dass das ein egoistisch angelegtes Skript ist, welches auf mehrfache Anfrage von mir hier nun in genau dieser Version veröffentlicht wird.
 
 ## HowTo
 ### 1. Variablen anpassen
