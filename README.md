@@ -24,6 +24,7 @@ Das Script kann von jedem Client im Netz mit funktionierender Bash ausgeführt w
 
 Es wird außerdem unter der Datei "dns-cache.log" ein einfaches Logging abgelegt, um nachzuvollziehen können, ob das automatisierte Dumping funktioniert.
 Hilfreich ist außerdem zur Kontrolle des Cache-Aufwuchses bspw:
+
 `sudo unbound-control dump_cache | wc -l`
 
 ### Disclaimer
