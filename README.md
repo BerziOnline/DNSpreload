@@ -22,6 +22,10 @@ Das Script zieht sich einen Dump von Top-Domains in Deutschland, sowie weiteren 
 
 Das Script kann von jedem Client im Netz mit funktionierender Bash ausgeführt werden, es empfiehlt sich jedoch deutlich das Script auf dem unbound-Server selbst auszuführen, um die Flut an DNS-Abfragen lokal zu initiieren und nicht unnötigerweise durch das lokale Netz zwischen Client & Server zu senden.
 
+Es wird außerdem unter der Datei "dns-cache.log" ein einfaches Logging abgelegt, um nachzuvollziehen können, ob das automatisierte Dumping funktioniert.
+Hilfreich ist außerdem zur Kontrolle des Cache-Aufwuchses bspw:
+`sudo unbound-control dump_cache | wc -l`
+
 ### Disclaimer
 Als reiner Netzwerktechniker habe ich mir über die "Sache" selbst Gedanken gemacht und diese gelöst. In puncto Skripting/Programmierung gibt es mit ziemlicher Sicherheit elegantere und vor allem anwenderfreundlichere Lösungen in der Umsetzung. Seht es mir nach, dass das ein egoistisch angelegtes Skript ist, welches auf mehrfache Anfrage von mir hier nun in genau dieser Version veröffentlicht wird.
 
