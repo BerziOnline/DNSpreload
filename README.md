@@ -14,7 +14,7 @@ Die Server haben eine breite Ansammlung an Caching-Einträgen und antworten blit
 Natürlich kann man nicht das ganze Internet cachen. Aber wie wäre es mit dem Anteil, den man davon in 95% der Zeit benutzt?
 
 #### Privatsphäre
-Durch diese Maßnahme erhöht mein seine Privatsphäre in puncto DNS-Abfragen auf ein absolutes Maximum. Eine gängige Praxis ist es seine Privatsphäre mit Datensparsamkeit zu schützen. Eine unterschätzte Praxis ist es aber auch seine Daten mit Daten-Flooding zu schützen. Hier kommen beide Strategien zum Tragen:
+Durch diese Maßnahme erhöht man seine Privatsphäre in puncto DNS-Abfragen auf ein Maximum. Eine gängige Praxis ist es seine Privatsphäre mit Datensparsamkeit zu schützen. Eine unterschätzte Praxis ist es aber auch seine Daten mit Daten-Flooding zu schützen. Hier kommen beide Strategien zum Tragen:
 Aus dem Netzwerk heraus werden täglich tausende Domains nahezu willkürlich vor-gecached. Es ist für Außenstehende Provider und Anbieter nicht ersichtlich, welche davon wirklich benötigt werden und welche nicht. Anschließende DNS-Anfragen der Clients innerhalb des eigenen Netzwerkes für den wirklichen Besuch der Seiten finden nur noch lokal statt, da der DNS-Server jede Anfrage nicht-autoritativ beantworten kann.
 
 ## Wie funktioniert das?
