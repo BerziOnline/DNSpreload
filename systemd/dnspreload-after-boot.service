@@ -1,0 +1,11 @@
+[Unit]
+Description=dnspreload v2: preload network domains after boot (cache dumps omit expired entries)
+After=unbound.service pihole-FTL.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=dnspreload
+ExecStartPre=/bin/sleep 90
+ExecStart=/opt/dnspreload-v2/dnspreload preload network
+[Install]
+WantedBy=multi-user.target

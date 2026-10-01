@@ -1,0 +1,3 @@
+dnspreload ALL=(root) NOPASSWD: /usr/sbin/unbound-control stats_noreset, /usr/sbin/unbound-control dump_cache
+dnspreload ALL=(root) NOPASSWD: /usr/local/bin/dnspreload-switch list, /usr/local/bin/dnspreload-switch [a-z-]* status, /usr/local/bin/dnspreload-switch [a-z-]* json, /usr/local/bin/dnspreload-switch [a-z-]* off, /usr/local/bin/dnspreload-switch [a-z-]* on [0-9]*
+dnspreload ALL=(root) NOPASSWD: /usr/local/bin/dnspreload-blockmon apply allow *, /usr/local/bin/dnspreload-blockmon apply deny *, /usr/local/bin/dnspreload-blockmon apply dismiss *, /usr/local/bin/dnspreload-blockmon apply later *

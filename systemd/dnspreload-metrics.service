@@ -1,0 +1,14 @@
+[Unit]
+Description=dnspreload v2: export metrics (InfluxDB line protocol) to state/metrics.txt
+After=unbound.service
+
+[Service]
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/dnspreload-v2/lists /opt/dnspreload-v2/state /opt/dnspreload-v2/logs
+Type=oneshot
+User=dnspreload
+WorkingDirectory=/opt/dnspreload-v2
+ExecStart=/opt/dnspreload-v2/panel metrics

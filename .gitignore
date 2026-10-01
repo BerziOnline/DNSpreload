@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+# Android build
+app/build/
+app/app/build/
+app/.gradle/
+app/local.properties
+app/keystore.properties
+app/app.properties
+*.jks
+*.keystore
+*.apk
+.idea/

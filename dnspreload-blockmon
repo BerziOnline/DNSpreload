@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""dnspreload-blockmon — Deterministic overblocking/underblocking monitor, no LLM.
+
+  scan            Read FTL/gravity candidates -> state/blockmon.json (timer: every 6 h).
+  apply allow|deny|dismiss|later <domain>   Apply via Pi-hole API and record (root, sudo from panel).
+  test            Built-in synthetic database tests; no Pi-hole installation required.
+
+Overblocking signals (suggest allow):
+  S1 newly blocked: normal replies on >= 3 days in 30 days, blocked only since the list update.
+  S2 persistent: >= 8 blocked queries in 10 min, >= 3 bursts/day; broken apps retry, ad beacons do not.
+  S3 related: an allowed sibling domain queried by the same device within 5 s of a blocked query.
+  S4 minority: exactly one blocklist includes the domain.
+  Penalty: advertising/tracking words (ads, analytics, telemetry, metrics, beacon, pixel, track, log, stats).
+Underblocking signals (suggest deny):
+  U1 stricter list: allowed, but included in Hagezi ULTIMATE; review before adopting stricter blocking.
+  U2 tracker pattern: allowed ad/tracking name, >= 2 devices, >= 20 queries, absent from all lists.
+Decisions: state/blockmon-decisions.json; dismiss mutes for 90 days, later for 14 days.
+"""
+import json, os, re, sqlite3, subprocess, sys, time, urllib.request
+from pathlib import Path
+
+BASE = Path(os.environ.get("DNSPRELOAD_HOME", "/opt/dnspreload-v2"))
+STATE, LISTS = BASE / "state", BASE / "lists"
+
+def _setting(key, default):
+    """Setting precedence: environment > config.env in the program directory > default."""
+    if os.environ.get(key): return os.environ[key]
+    p = BASE / "config.env"
+    if p.exists():
+        for line in p.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line.startswith(key + "="): return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return default
+
+# Only user-visible reasons are localized; CLI messages remain English.
+DE = {
+    "normal replies on {days} days until {date}, blocked {n}× since the list update": "bis {date} an {days} Tagen normal beantwortet, seit Listen-Update {n}× gesperrt",
+    "continuous requests ({queries} queries from one device) — typical telemetry, not functionality": "Dauerfeuer ({queries} Anfragen von einem Gerät) — typisch Telemetrie, nicht Funktion",
+    "{total} request bursts in 24 h (retries like a broken app, not an ad beacon)": "{total} Anfrage-Salven in 24 h (wiederholt wie eine kaputte App, nicht wie ein Werbe-Beacon)",
+    "belongs to the currently visited site {site}": "gehört zur gerade besuchten Seite {site}",
+    "only one blocklist includes it": "nur eine Sperrliste führt sie",
+    "name suggests advertising/tracking": "Name klingt nach Werbung/Tracking",
+    "listed in Hagezi ULTIMATE (stricter than our lists)": "steht in Hagezi ULTIMATE (strenger als unsere Listen)",
+    "advertising/tracking word in the name, absent from all lists": "Werbe-/Tracking-Wort im Namen, in keiner Liste",
+    "bursts": "Salven",
+    "visited site": "besuchten Seite",
+    "only one blocklist": "nur eine Sperrliste",
+}
+UI_LANG = _setting("UI_LANG", "en").strip().lower()
+
+def _(text):
+    """Translate reason templates and test fragments; fall back to English."""
+    return DE.get(text, text) if UI_LANG == "de" else text
+
+FTL_DB = os.environ.get("FTL_DB", "/etc/pihole/pihole-FTL.db")
+GRAVITY_DB = os.environ.get("GRAVITY_DB", "/etc/pihole/gravity.db")
+HISTORY_FLOOR = int(os.environ.get("BLOCKMON_HISTORY_FLOOR") or _setting("STATS_SINCE", "0"))   # current list history starts here; imported older history does not count as previously allowed
+ULTIMATE_URL = "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/ultimate-onlydomains.txt"
+BLOCKED = "(1,4,5,6,7,8,9,10,11,16)"; OK = "(2,3,17)"
+ADWORDS = re.compile(r"(^|[.-])(ads?|adserv\w*|adv\w*|ade|adx|adm|adashx\w*|analytics|telemetry|metrics?|beacon|pixel|track\w*|tracing|collector|log(s|\d+)?|stats?|doubleclick|adsystem|crash(es|lytics)?|report(s|ing)?|events?|measurement)([.-]|$)")
+# Shared infrastructure domains do not imply a relationship to the visited site
+SHARED_BASES = {"googleapis.com", "google.com", "gstatic.com", "cloudfront.net", "amazonaws.com", "akamaized.net", "akamaihd.net", "azureedge.net", "windows.net",
+                "cloudflare.net", "fastly.net", "edgekey.net", "edgesuite.net", "llnwd.net", "googleusercontent.com", "microsoft.com", "apple.com", "facebook.com", "fbcdn.net"}
+SYSTEM_CLIENTS = tuple(x.strip() for x in _setting("SYSTEM_CLIENTS", "127.0.0.1").split(",") if x.strip())   # preload, Pi-hole, server, gateway
+SLD2 = {"co", "com", "net", "org", "gov", "edu", "ac"}
+EXCL = "client NOT IN (SELECT id FROM client_by_id WHERE ip IN (%s))" % ",".join("'%s'" % c for c in SYSTEM_CLIENTS)
+
+def base_domain(d):
+    p = d.lower().strip(".").split(".")
+    if len(p) >= 3 and p[-2] in SLD2 and len(p[-1]) == 2: return ".".join(p[-3:])
+    return ".".join(p[-2:]) if len(p) >= 2 else d
+
+def load_ultimate(now):
+    p = LISTS / "hagezi-ultimate.txt"
+    if not p.exists() or now - p.stat().st_mtime > 86400:
+        try:
+            with urllib.request.urlopen(ULTIMATE_URL, timeout=60) as r: data = r.read()
+            if len(data) > 1_000_000: tmp = p.with_suffix(".tmp"); tmp.write_bytes(data); os.replace(tmp, p)
+        except Exception: pass
+    if not p.exists(): return set()
+    return {l.strip().lower() for l in p.open(errors="ignore") if l.strip() and not l.startswith("#")}
+
+def in_set_or_parent(d, s):
+    p = d.lower().split(".")
+    return any(".".join(p[i:]) in s for i in range(len(p) - 1))
+
+def lists_for(g, domain):
+    """Blocklist IDs containing the domain or a parent (hosts and ABP formats)."""
+    p = domain.lower().split("."); cands = []
+    for i in range(len(p) - 1):
+        d = ".".join(p[i:]); cands += [d, f"||{d}^"]
+    q = "SELECT DISTINCT adlist_id FROM gravity WHERE domain IN (%s)" % ",".join("?" * len(cands))
+    return sorted(r[0] for r in g.execute(q, cands))
+
+def decisions():
+    p = STATE / "blockmon-decisions.json"
+    try: return json.loads(p.read_text()) if p.exists() else {}
+    except ValueError: return {}
+
+def muted(dec, d, now):
+    e = dec.get(d)
+    if not e: return False
+    age = now - e.get("ts", 0)
+    return e["decision"] in ("allow", "deny") or (e["decision"] == "dismiss" and age < 90 * 86400) or (e["decision"] == "later" and age < 14 * 86400)
+
+def scan(now=None, ftl=FTL_DB, gravity=GRAVITY_DB, ultimate=None, out=None):
+    now = now or time.time(); t30 = max(int(now - 30 * 86400), HISTORY_FLOOR); t1 = int(now - 86400)
+    con = sqlite3.connect(f"file:{ftl}?mode=ro", uri=True, timeout=30); g = sqlite3.connect(f"file:{gravity}?mode=ro", uri=True, timeout=30)
+    gu = g.execute("SELECT value FROM info WHERE property='updated'").fetchone(); gup = int(gu[0]) if gu and str(gu[0]).isdigit() else t1
+    dec = decisions(); ult = load_ultimate(now) if ultimate is None else ultimate
+    over, under = {}, {}
+    # --- S1: previously allowed, blocked only since the list update
+    rows = con.execute(f"""SELECT d.domain, COUNT(DISTINCT q.timestamp/86400) days_ok, MAX(q.timestamp) last_ok FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+        WHERE q.timestamp>=? AND q.timestamp<? AND q.status IN {OK} AND {EXCL} GROUP BY d.domain HAVING days_ok>=3""", (t30, gup)).fetchall()
+    okmap = {r[0]: r for r in rows}
+    if okmap:
+        blk = con.execute(f"""SELECT d.domain, COUNT(*) n, COUNT(DISTINCT q.client) c FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+            WHERE q.timestamp>=? AND q.status IN {BLOCKED} AND {EXCL} GROUP BY d.domain""", (gup,)).fetchall()
+        for dom, n, c in blk:
+            if dom in okmap and n >= 3:
+                stillok = con.execute(f"SELECT COUNT(*) FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE d.domain=? AND q.timestamp>=? AND q.status IN {OK} AND {EXCL}", (dom, gup)).fetchone()[0]
+                if stillok == 0:
+                    e = over.setdefault(dom, {"score": 0, "why": [], "queries": 0, "clients": 0})
+                    e["score"] += 60; e["why"].append(_("normal replies on {days} days until {date}, blocked {n}× since the list update").format(date=time.strftime('%d.%m.', time.localtime(okmap[dom][2])), days=okmap[dom][1], n=n)); e["queries"] = max(e["queries"], n); e["clients"] = max(e["clients"], c)
+    # --- S2: bursts per device in 24 h: >= 8 queries in 10 min, sliding window, >= 3 separate bursts
+    rows = con.execute(f"""SELECT d.domain, q.client, q.timestamp FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+        WHERE q.timestamp>=? AND q.status IN {BLOCKED} AND {EXCL} ORDER BY d.domain, q.client, q.timestamp""", (t1,)).fetchall()
+    bursts, cur, buf = {}, None, []
+    def flush():
+        if cur is None: return
+        n, i = 0, 0
+        while i < len(buf):
+            j = i
+            while j + 1 < len(buf) and buf[j + 1] - buf[i] <= 600: j += 1
+            if j - i + 1 >= 8: n += 1; i = j + 1
+            else: i += 1
+        if n: bursts.setdefault(cur[0], {})[cur[1]] = bursts.get(cur[0], {}).get(cur[1], 0) + n
+    for dom, cl, ts in rows:
+        if (dom, cl) != cur: flush(); cur, buf = (dom, cl), []
+        buf.append(ts)
+    flush()
+    heavy = {r[0]: r[1] for r in con.execute(f"""SELECT d.domain, MAX(n) FROM (SELECT q.domain, q.client, COUNT(*) n FROM query_storage q WHERE q.timestamp>=? AND q.status IN {BLOCKED} AND {EXCL} GROUP BY 1,2) x JOIN domain_by_id d ON d.id=x.domain GROUP BY 1 HAVING MAX(n)>=200""", (t1,))}
+    for dom, per in bursts.items():
+        total = sum(per.values())
+        if dom in heavy:
+            e = over.setdefault(dom, {"score": 0, "why": [], "queries": 0, "clients": 0}); e["score"] -= 20; e["why"].append(_("continuous requests ({queries} queries from one device) — typical telemetry, not functionality").format(queries=heavy[dom])); continue
+        if total >= 3:
+            e = over.setdefault(dom, {"score": 0, "why": [], "queries": 0, "clients": 0})
+            e["score"] += 35; e["why"].append(_("{total} request bursts in 24 h (retries like a broken app, not an ad beacon)").format(total=total)); e["clients"] = max(e["clients"], len(per))
+    # --- S3: blocked subdomain of a visited site (last 24 h, sample up to 400 blocked domains)
+    blk = con.execute(f"""SELECT d.domain, q.client, q.timestamp FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+        WHERE q.timestamp>=? AND q.status IN {BLOCKED} AND {EXCL} ORDER BY q.timestamp DESC LIMIT 4000""", (t1,)).fetchall()
+    seen = {}
+    for dom, cl, ts in blk:
+        if dom in seen or len(seen) > 400: continue
+        bd = base_domain(dom)
+        if bd in SHARED_BASES or dom.split(".")[-3:] == ["clients6", "google", "com"][-3:] and len(dom.split(".")) > 3 and ".".join(dom.split(".")[-3:]) == "clients6.google.com": seen[dom] = None; continue
+        hit = con.execute(f"""SELECT d.domain FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE q.client=? AND q.timestamp BETWEEN ? AND ? AND q.status IN {OK}
+            AND (d.domain=? OR d.domain LIKE ?) AND d.domain<>? LIMIT 1""", (cl, ts - 5, ts + 5, bd, "%." + bd, dom)).fetchone()
+        seen[dom] = hit[0] if hit else None
+    for dom, sib in seen.items():
+        if sib and not ADWORDS.search(dom):
+            e = over.setdefault(dom, {"score": 0, "why": [], "queries": 0, "clients": 0})
+            e["score"] += 25; e["why"].append(_("belongs to the currently visited site {site}").format(site=sib))
+    # --- S4 + penalties + lists
+    for dom, e in over.items():
+        ls = lists_for(g, dom); e["lists"] = ls
+        if len(ls) == 1: e["score"] += 10; e["why"].append(_("only one blocklist includes it"))
+        if ADWORDS.search(dom): e["score"] -= 30; e["why"].append(_("name suggests advertising/tracking"))
+        if in_set_or_parent(dom, ult): e["score"] -= 10
+    # --- U1/U2: allowed, but in Ultimate or matching a tracker pattern (7 days, >= 2 devices)
+    rows = con.execute(f"""SELECT d.domain, COUNT(*) n, COUNT(DISTINCT q.client) c FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+        WHERE q.timestamp>=? AND q.status IN {OK} AND {EXCL} GROUP BY d.domain HAVING c>=2 AND n>=20""", (int(now - 7 * 86400),)).fetchall()
+    ever_blocked = {r[0] for r in con.execute(f"""SELECT DISTINCT d.domain FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE q.timestamp>=? AND q.status IN {BLOCKED}""", (int(now - 7 * 86400),))}
+    for dom, n, c in rows:
+        if dom.endswith(".lan") or dom.endswith(".arpa") or dom in ever_blocked or dom in over: continue   # already blocked (e.g. outside a switch window) -> not underblocking
+        why, sc = [], 0
+        if in_set_or_parent(dom, ult): sc += 40; why.append(_("listed in Hagezi ULTIMATE (stricter than our lists)"))
+        if ADWORDS.search(dom) and not lists_for(g, dom): sc += 30; why.append(_("advertising/tracking word in the name, absent from all lists"))
+        if sc: under[dom] = {"score": sc + min(20, c * 2), "why": why, "queries": n, "clients": c, "lists": []}
+    def pack(d, kind):
+        return sorted([{"domain": k, "kind": kind, **v} for k, v in d.items() if v["score"] >= 30 and not muted(dec, k, now)], key=lambda x: -x["score"])[:60]
+    res = {"time": now, "gravity_updated": gup, "over": pack(over, "over"), "under": pack(under, "under"), "ultimate_loaded": bool(ult)}
+    if out is not False:
+        STATE.mkdir(parents=True, exist_ok=True); p = out or (STATE / "blockmon.json"); tmp = p.with_suffix(".tmp"); tmp.write_text(json.dumps(res, indent=1, ensure_ascii=False)); os.replace(tmp, p)
+    con.close(); g.close(); return res
+
+def apply(decision, domain, by="panel"):
+    if decision not in ("allow", "deny", "dismiss", "later") or not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,62}\.)+[a-z]{2,24}", domain.lower()): print("invalid", file=sys.stderr); return 2
+    domain = domain.lower()
+    if decision in ("allow", "deny"):
+        pw = Path("/etc/pihole/cli_pw").read_text().strip(); api = "http://127.0.0.1/api"
+        def call(method, path, body=None, sid=None):
+            req = urllib.request.Request(api + path, data=json.dumps(body).encode() if body is not None else None, method=method, headers={"Content-Type": "application/json", **({"sid": sid} if sid else {})})
+            with urllib.request.urlopen(req, timeout=15) as r: return json.loads(r.read() or b"{}")
+        sid = call("POST", "/auth", {"password": pw})["session"]["sid"]
+        try:
+            r = call("POST", f"/domains/{decision}/exact", {"domain": domain, "comment": f"blockmon {time.strftime('%d.%m.%y')} ({by})", "groups": [0], "enabled": True}, sid)
+            if r.get("processed", {}).get("errors"): print(r["processed"]["errors"], file=sys.stderr); return 1
+        finally: call("DELETE", "/auth", sid=sid)
+    p = STATE / "blockmon-decisions.json"; d = decisions(); d[domain] = {"decision": decision, "ts": int(time.time()), "by": by}
+    tmp = p.with_suffix(".tmp"); tmp.write_text(json.dumps(d, indent=1)); os.replace(tmp, p); os.chmod(p, 0o664)
+    # Remove the candidate immediately so the page is correct without another scan
+    bp = STATE / "blockmon.json"
+    if bp.exists():
+        try:
+            b = json.loads(bp.read_text()); b["over"] = [x for x in b["over"] if x["domain"] != domain]; b["under"] = [x for x in b["under"] if x["domain"] != domain]
+            tmp = bp.with_suffix(".tmp"); tmp.write_text(json.dumps(b, indent=1, ensure_ascii=False)); os.replace(tmp, bp)
+        except ValueError: pass
+    print(f"{decision} {domain}"); return 0
+
+def _fixture(tmp, now):
+    """Synthetic FTL/gravity databases with known cases."""
+    ftl, grav = tmp / "ftl.db", tmp / "gravity.db"
+    c = sqlite3.connect(ftl)
+    c.executescript("""CREATE TABLE query_storage(id INTEGER PRIMARY KEY, timestamp INTEGER, type INTEGER, status INTEGER, domain INTEGER, client INTEGER, forward INTEGER, additional_info INTEGER, reply_type INTEGER, reply_time REAL, dnssec INTEGER, list_id INTEGER, ede INTEGER);
+        CREATE TABLE domain_by_id(id INTEGER PRIMARY KEY, domain TEXT); CREATE TABLE client_by_id(id INTEGER PRIMARY KEY, ip TEXT, name TEXT);""")
+    doms = ["googleads.googleapis.com", "beacon.example-ads.com", "api.shop-app.de", "www.shop-app.de", "cdn.brokenapp.io", "graph.facebook.com", "pixel.tracker-x.net", "static.serveronly.org"]
+    for i, d in enumerate(doms, 1): c.execute("INSERT INTO domain_by_id VALUES(?,?)", (i, d))
+    for i, ip in enumerate(["192.0.2.20", "192.0.2.21", "192.0.2.99"], 1): c.execute("INSERT INTO client_by_id VALUES(?,?,?)", (i, ip, ""))
+    gup = int(now - 86400)
+    q = lambda ts, st, dom, cl: c.execute("INSERT INTO query_storage(timestamp,type,status,domain,client,reply_time) VALUES(?,?,?,?,?,0)", (int(ts), 1, st, dom, cl))
+    for day in range(10, 2, -1): q(now - day * 86400, 2, 1, 2); q(now - day * 86400 + 100, 2, 1, 2)      # googleads: allowed for 8 days
+    for k in range(5): q(gup + 100 + k * 600, 1, 1, 2)                                                       # blocked since the update -> S1
+    for h in range(20): q(now - h * 3600, 1, 2, 1)                                                           # beacon: blocked once/hour -> not a candidate
+    for b in range(4):                                                                                       # brokenapp: 4 bursts of 10 -> S2
+        for k in range(10): q(now - 3600 * (b + 1) + k * 20, 1, 5, 1)
+    q(now - 500, 2, 4, 1); q(now - 498, 1, 3, 1)                                                             # shop-app: www allowed, api blocked 2 s later -> S3
+    for k in range(25): q(now - k * 3600, 2, 7, 1); q(now - k * 3600 - 5, 2, 7, 2)                            # pixel.tracker-x: allowed, 2 devices, 50 queries -> U2
+    for k in range(25): q(now - k * 3600, 2, 6, 1); q(now - k * 3600 - 5, 2, 6, 2)                            # graph.facebook: allowed, in Ultimate -> U1
+    for k in range(30): q(now - k * 1000, 1, 8, 3)                                                           # server client only -> ignored
+    c.execute("INSERT INTO domain_by_id VALUES(9,'graph.social.com')"); c.execute("INSERT INTO domain_by_id VALUES(10,'fire.telemetry-heavy.com')")
+    for k in range(30): q(now - k * 600, 1, 9, 1)                                                            # graph.social: blocked 30 times ...
+    for k in range(25): q(now - 80000 - k * 100, 2, 9, 1); q(now - 80000 - k * 100, 2, 9, 2)                # ... and previously allowed (switch on) -> must NOT appear in under
+    for k in range(400): q(now - k * 60, 1, 10, 1)                                                           # continuous requests: 400/day from one device -> bursts, but penalized
+    c.commit(); c.close()
+    g = sqlite3.connect(grav); g.executescript("CREATE TABLE gravity(domain TEXT, adlist_id INTEGER); CREATE TABLE info(property TEXT, value TEXT);")
+    g.executemany("INSERT INTO gravity VALUES(?,?)", [("||googleads.googleapis.com^", 1), ("beacon.example-ads.com", 1), ("beacon.example-ads.com", 2), ("cdn.brokenapp.io", 3), ("||shop-app.de^", 2), ("static.serveronly.org", 1)])
+    g.execute("INSERT INTO info VALUES('updated',?)", (str(gup),)); g.commit(); g.close()
+    return ftl, grav
+
+def test():
+    import tempfile
+    global STATE, LISTS
+    global HISTORY_FLOOR, SYSTEM_CLIENTS, EXCL
+    now = time.time(); HISTORY_FLOOR = 0; SYSTEM_CLIENTS = ("127.0.0.1", "192.0.2.99"); EXCL = "client NOT IN (SELECT id FROM client_by_id WHERE ip IN (%s))" % ",".join("'%s'" % c for c in SYSTEM_CLIENTS); tmp = Path(tempfile.mkdtemp()); STATE, LISTS = tmp / "state", tmp / "lists"
+    ftl, grav = _fixture(tmp, now)
+    r = scan(now, str(ftl), str(grav), ultimate={"facebook.com", "social.com"}, out=tmp / "state" / "blockmon.json")
+    over = {x["domain"]: x for x in r["over"]}; under = {x["domain"]: x for x in r["under"]}
+    checks = [("S1 googleads suggested", "googleads.googleapis.com" in over and over["googleads.googleapis.com"]["score"] >= 60),
+              ("Beacon (once/hour) NOT suggested", "beacon.example-ads.com" not in over),
+              ("S2 brokenapp (bursts) suggested", "cdn.brokenapp.io" in over and any(_("bursts") in w for w in over["cdn.brokenapp.io"]["why"])),
+              ("S3 api.shop-app (related site) suggested", "api.shop-app.de" in over and any(_("visited site") in w for w in over["api.shop-app.de"]["why"])),
+              ("S4 single blocklist detected (googleads)", _("only one blocklist") in " ".join(over.get("googleads.googleapis.com", {}).get("why", []))),
+              ("U1 graph.facebook (Ultimate) suggested", "graph.facebook.com" in under),
+              ("U2 pixel.tracker-x (pattern) suggested", "pixel.tracker-x.net" in under),
+              ("Server-only domain ignored", "static.serveronly.org" not in over),
+              ("Sorted by score", [x["score"] for x in r["over"]] == sorted([x["score"] for x in r["over"]], reverse=True))]
+    # Decisions: dismiss removes the next scan candidate; later expires after 14 days
+    (tmp / "state" / "blockmon-decisions.json").write_text(json.dumps({"googleads.googleapis.com": {"decision": "dismiss", "ts": int(now)}, "cdn.brokenapp.io": {"decision": "later", "ts": int(now - 15 * 86400)}}))
+    r2 = scan(now, str(ftl), str(grav), ultimate=set(), out=tmp / "state" / "blockmon.json"); o2 = {x["domain"] for x in r2["over"]}
+    checks += [("dismiss suppresses candidate", "googleads.googleapis.com" not in o2), ("later returns after 14 days", "cdn.brokenapp.io" in o2),
+               ("Blocked+allowed domain never underblocked", "graph.social.com" not in under),
+               ("Continuous requests not suggested as a broken app", "fire.telemetry-heavy.com" not in over),
+               ("No domain in both lists", not (set(over) & set(under)))]
+    bad = [n for n, ok in checks if not ok]
+    for n, ok in checks: print(("ok  " if ok else "FAIL"), n)
+    print(f"{len(checks)-len(bad)}/{len(checks)} passed"); return 1 if bad else 0
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
+    if cmd == "scan": r = scan(); print(f"overblocked: {len(r['over'])}, underblocked: {len(r['under'])}, Ultimate loaded: {r['ultimate_loaded']}")
+    elif cmd == "apply": sys.exit(apply(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "panel"))
+    elif cmd == "test": sys.exit(test())
+    else: print(__doc__); sys.exit(2)

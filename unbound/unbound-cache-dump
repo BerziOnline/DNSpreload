@@ -1,0 +1,4 @@
+#!/bin/sh
+# Dump the unbound cache atomically, so a half-written file is never loaded.
+D=/var/lib/unbound/cache/unbound.cache
+unbound-control dump_cache > "$D.tmp" && mv -f "$D.tmp" "$D"

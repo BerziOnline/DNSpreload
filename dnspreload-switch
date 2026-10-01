@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# dnspreload-switch: timed Pi-hole group toggles, supporting multiple switches.
+# Pi-hole API: /api/auth (CLI password), PUT /api/groups/<group>. Auto-off via systemd-run.
+# Config: /etc/dnspreload/switches.json  { "<name>": {"group":..., "label":..., "presets":[30,120], "max":240}, ... }
+# Usage: dnspreload-switch <name> on [MIN] | off | status | json
+#        dnspreload-switch all off          (fail-safe boot reset)
+#        dnspreload-switch list             (all switches as JSON with state)
+set -euo pipefail
+CFG=${DNSPRELOAD_SWITCHES:-/etc/dnspreload/switches.json}
+RUN=/run/dnspreload-switch; API=http://127.0.0.1/api
+mkdir -p "$RUN"
+
+die() { echo "dnspreload-switch: $*" >&2; exit 2; }
+cfg() { python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));n=sys.argv[2];k=sys.argv[3]
+if n not in c: sys.exit(3)
+v=c[n].get(k,""); print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$CFG" "$1" "$2"; }
+
+NAME=${1:-}; CMD=${2:-status}
+[ -n "$NAME" ] || die "usage: dnspreload-switch <name>|all on [min] | off | status | json | list"
+
+if [ "$NAME" = list ]; then
+  python3 - "$CFG" "$RUN" <<'PY'
+import json,sys,os,time
+c=json.load(open(sys.argv[1])); run=sys.argv[2]; out=[]
+for n,s in c.items():
+    p=os.path.join(run,n+".until"); until=int(open(p).read()) if os.path.exists(p) else None
+    out.append({"name":n,"label":s["label"],"scope":s.get("scope",""),"kind":s.get("kind","full"),"presets":s.get("presets",[30,120]),"max":s.get("max",240),"devices":s.get("devices",[]),
+                "roles":s.get("roles",["admin"]),"until":until,"on":bool(until and until>time.time())})
+print(json.dumps(out))
+PY
+  exit 0
+fi
+if [ "$NAME" = all ]; then
+  [ "$CMD" = off ] || die "all: only 'off' is supported"
+  for n in $(python3 -c 'import json,sys;print(" ".join(json.load(open(sys.argv[1]))))' "$CFG"); do "$0" "$n" off; done; exit 0
+fi
+
+GROUP=$(cfg "$NAME" group) || die "unknown switch '$NAME'"
+MODE=$(cfg "$NAME" mode); MODE=${MODE:-group}
+MAX=$(cfg "$NAME" max); MAX=${MAX:-240}
+PW=$(cat /etc/pihole/cli_pw)
+SID=$(curl -sf -X POST "$API/auth" -H 'Content-Type: application/json' -d "{\"password\":\"$PW\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["session"]["sid"])')
+trap 'curl -s -X DELETE "$API/auth" -H "sid: $SID" >/dev/null' EXIT
+cur() { curl -sf "$API/groups/$GROUP" -H "sid: $SID"; }
+set_enabled() {
+  if [ "$MODE" = blocking ]; then   # network-wide: switch ON disables blocking; Pi-hole has a second fail-safe timer
+    local secs; secs=$([ "$1" = true ] && echo $(( ${MIN:-30}*60 )) || echo null)
+    curl -sf -X POST "$API/dns/blocking" -H "sid: $SID" -H 'Content-Type: application/json' -d "{\"blocking\":$([ "$1" = true ] && echo false || echo true),\"timer\":$secs}" >/dev/null; return
+  fi
+  local c; c=$(cur | EN="$1" python3 -c 'import sys,json,os;g=json.load(sys.stdin)["groups"][0];print(json.dumps({"name":g["name"],"comment":g["comment"],"enabled":os.environ["EN"]=="true"}))')
+  curl -sf -X PUT "$API/groups/$GROUP" -H "sid: $SID" -H 'Content-Type: application/json' -d "$c" >/dev/null
+}
+enabled() { if [ "$MODE" = blocking ]; then curl -sf "$API/dns/blocking" -H "sid: $SID" | python3 -c 'import sys,json;print("1" if json.load(sys.stdin)["blocking"]=="disabled" else "0")'; return; fi; cur | python3 -c 'import sys,json;print("1" if json.load(sys.stdin)["groups"][0]["enabled"] else "0")'; }
+UNTIL="$RUN/$NAME.until"; UNIT="dnspreload-switch-$NAME-off"
+
+case "$CMD" in
+  on)  MIN=${3:-30}; [[ "$MIN" =~ ^[0-9]+$ ]] && [ "$MIN" -ge 1 ] && [ "$MIN" -le "$MAX" ] || die "minutes 1..$MAX"
+       echo $(( $(date +%s) + MIN*60 )) > "$UNTIL"
+       set_enabled true
+       systemctl stop "$UNIT.timer" 2>/dev/null || true
+       systemd-run --quiet --unit="$UNIT" --on-active="${MIN}m" --description="dnspreload-switch $NAME automatic off" "$0" "$NAME" off
+       echo "$NAME ON for $MIN min (until $(date -d @"$(cat "$UNTIL")" +%H:%M))" ;;
+  off) set_enabled false; rm -f "$UNTIL"; systemctl stop "$UNIT.timer" 2>/dev/null || true; echo "$NAME OFF" ;;
+  status) if [ "$(enabled)" = 1 ]; then echo "$NAME: ON"; [ -r "$UNTIL" ] && echo "  auto-off at $(date -d @"$(cat "$UNTIL")" +%H:%M)"; else echo "$NAME: off"; fi ;;
+  json) E=$(enabled); U=$([ -r "$UNTIL" ] && cat "$UNTIL" || echo null)
+       # Enabled group without a timer (e.g. a manual UI change): expose the untimed state as a warning
+       printf '{"name":"%s","on":%s,"until":%s,"untimed":%s}\n' "$NAME" "$([ "$E" = 1 ] && echo true || echo false)" "$U" "$([ "$E" = 1 ] && [ "$U" = null ] && echo true || echo false)" ;;
+  *) die "usage: dnspreload-switch <name> on [min] | off | status | json" ;;
+esac

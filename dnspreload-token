@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# dnspreload-token: manage panel/app access tokens; store the token and its SHA-256 hash.
+#   dnspreload-token add <role> "<label>"   -> print the token once
+#   dnspreload-token list | revoke <id>
+set -euo pipefail
+F=${DNSPRELOAD_TOKENS:-/etc/dnspreload/tokens.json}
+[ -f "$F" ] || { echo '{}' > "$F"; chown root:dnspreload "$F"; chmod 0640 "$F"; }
+case "${1:-}" in
+  add) ROLE=${2:-}; LABEL=${3:-}; [[ "$ROLE" =~ ^(admin|family)$ ]] || { echo "Rolle: admin|family" >&2; exit 2; }; [ -n "$LABEL" ] || { echo "Bezeichnung fehlt" >&2; exit 2; }
+       TOK=$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32); H=$(printf '%s' "$TOK" | sha256sum | cut -c1-64)
+       python3 - "$F" "$H" "$ROLE" "$LABEL" "$TOK" <<'PY'
+import json,sys,time
+f,h,role,label,tok=sys.argv[1:]; d=json.load(open(f)); n=max([int(k) for k in d] or [0])+1
+d[str(n)]={"hash":h,"token":tok,"role":role,"label":label,"created":int(time.time())}; json.dump(d,open(f,"w"),indent=1)
+print(f"id {n} ({role}, {label})")
+PY
+       echo "TOKEN (einmalig): $TOK" ;;
+  list-json) cat "$F" ;;
+  list) python3 -c 'import json,sys,time;d=json.load(open(sys.argv[1]));[print(k,v["role"],v["label"],time.strftime("%d.%m.%y",time.localtime(v["created"]))) for k,v in d.items()]' "$F" ;;
+  revoke) python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print("entfernt" if d.pop(sys.argv[2],None) else "unbekannt");json.dump(d,open(sys.argv[1],"w"),indent=1)' "$F" "${2:-}" ;;
+  *) echo "usage: dnspreload-token add <admin|family> \"<label>\" | list | list-json | revoke <id>"; exit 2 ;;
+esac

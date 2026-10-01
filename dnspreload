@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""dnspreload v2 — Preload unbound from top-domain lists and learned network usage.
+
+Commands: update | preload [slice|full|network] | status | report
+preload slice: refresh a fixed hourly slice (checksum-based), spreading the load across the day.
+  Each name refreshes every SLICE_HOURS hours, below unbound's 24 h serve-expired-ttl.
+preload full: refresh everything at once, for manual or emergency use.
+Plain-text sources: lists/*.txt; only lists/merged-final.txt is preloaded.
+Configuration: config.env alongside this script. Requires python3, dnsperf, unbound-control, sqlite3.
+"""
+import csv, io, json, os, re, sqlite3, subprocess, sys, time, urllib.request, zipfile, zlib
+from pathlib import Path
+
+BASE = Path(os.environ.get("DNSPRELOAD_HOME", Path(__file__).resolve().parent))
+LISTS, STATE, LOGS = BASE / "lists", BASE / "state", BASE / "logs"
+for d in (LISTS, STATE, LOGS): d.mkdir(parents=True, exist_ok=True)
+
+# ---------- config ----------
+def load_config():
+    cfg = {"LEARN_DAYS": "90", "FREQUENT_DAYS": "30", "FREQUENT_MIN_PER_DAY": "3", "RECENT_HOURS": "24",
+           "TOP_DE": "0", "TOP_INTL": "20000", "QPS": "100", "UNBOUND": "127.0.0.1", "UNBOUND_PORT": "5335",
+           "EXCLUDE_TLDS": "arpa,lan,local,localhost,home,internal,onion", "SOURCES": "tranco,umbrella,radar",
+           "RADAR_TOKEN": "", "FTL_DB": "/etc/pihole/pihole-FTL.db", "GRAVITY_DB": "/etc/pihole/gravity.db",
+           "SERVFAIL_PAUSE_DAYS": "7", "DNSPERF_TIMEOUT": "8", "SLICE_HOURS": "22", "SLICE_QPS": "5"}
+    cfg.update({"INTL_TLD_WHITELIST": "true", "INTL_TLDS": ""})
+    p = BASE / "config.env"
+    if p.exists():
+        for line in p.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if "=" in line:
+                k, v = line.split("=", 1); cfg[k.strip()] = v.strip().strip('"').strip("'")
+    return cfg
+C = load_config()
+EXCL_TLDS = tuple("." + t.strip() for t in C["EXCLUDE_TLDS"].split(",") if t.strip())
+INTL_TLDS = {t.strip().lower().lstrip(".") for t in C["INTL_TLDS"].replace(" ", ",").split(",") if t.strip()}
+INTL_WHITELIST = C["INTL_TLD_WHITELIST"].strip().lower() in ("1", "true", "yes", "ja", "on")
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z]{2,63}$")
+
+def log(msg):
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    print(line, flush=True)
+    with open(LOGS / "dnspreload.log", "a") as f: f.write(line + "\n")
+
+def clean(dom):
+    d = dom.strip().lower().rstrip(".")
+    if not d or not DOMAIN_RE.match(d) or d.endswith(EXCL_TLDS): return None
+    return d
+
+def intl_tld_ok(d):
+    """Filter the international top list by TLD; an empty list disables filtering.
+    Whitelist includes these TLDs; blacklist excludes them. Use the final label (co.uk = uk)."""
+    if not INTL_TLDS: return True
+    return (d.rsplit(".", 1)[-1] in INTL_TLDS) == INTL_WHITELIST
+
+def read_list(name):
+    p = LISTS / name
+    if not p.exists(): return []
+    return [clean(l) for l in p.read_text().splitlines() if l.strip() and not l.startswith("#")]
+
+def write_list(name, domains, header):
+    doms = sorted({d for d in domains if d})
+    p = LISTS / name; tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(f"# {header}\n# generated {time.strftime('%Y-%m-%d %H:%M')} — {len(doms)} domains\n" + "\n".join(doms) + "\n")
+    os.replace(tmp, p)   # atomic: timers never see partial files
+    return len(doms)
+
+# ---------- sources ----------
+def fetch(url, timeout=60, headers=None):
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": "dnspreload/2"})
+    with urllib.request.urlopen(req, timeout=timeout) as r: return r.read()
+
+def src_tranco():
+    z = zipfile.ZipFile(io.BytesIO(fetch("https://tranco-list.eu/top-1m.csv.zip", 120)))
+    rows = csv.reader(io.TextIOWrapper(z.open(z.namelist()[0]), encoding="utf-8", newline=""))
+    return [r[1].strip() for r in rows if len(r) >= 2]
+
+def src_umbrella():
+    z = zipfile.ZipFile(io.BytesIO(fetch("https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip", 120)))
+    rows = csv.reader(io.TextIOWrapper(z.open(z.namelist()[0]), encoding="utf-8", newline=""))
+    return [r[1].strip() for r in rows if len(r) >= 2]
+
+def src_radar():
+    """Cloudflare Radar: DE top 100 (country filter limit) and an unordered global
+    ranking bucket (100k) for confirmation. Return (de_top100, global_bucket_set)."""
+    if not C["RADAR_TOKEN"]: return [], set()
+    H = {"Authorization": "Bearer " + C["RADAR_TOKEN"], "User-Agent": "dnspreload/2", "Content-Type": "application/json"}
+    j = json.loads(fetch("https://api.cloudflare.com/client/v4/radar/ranking/top?location=DE&limit=100", 30, H))
+    de100 = [i["domain"] for i in (j.get("result", {}).get("top_0") or []) if "domain" in i]
+    j = json.loads(fetch("https://api.cloudflare.com/client/v4/radar/datasets?datasetType=RANKING_BUCKET&limit=10", 30, H))
+    ds = {d["alias"]: d["id"] for d in j["result"]["datasets"]}
+    did = ds.get("ranking_top_" + C.get("RADAR_BUCKET", "100000"))
+    bucket = set()
+    if did:
+        req = urllib.request.Request("https://api.cloudflare.com/client/v4/radar/datasets/download", method="POST", data=json.dumps({"datasetId": did}).encode(), headers=H)
+        with urllib.request.urlopen(req, timeout=30) as r: url = json.loads(r.read())["result"]["dataset"]["url"]
+        bucket = {l.strip().lower() for l in fetch(url, 120).decode().splitlines()[1:] if l.strip()}
+    return de100, bucket
+
+def build_general():
+    """general-de.txt: all .de names from the primary source plus Radar's DE top 100.
+    general-intl.txt: top N non-.de names. Prefer names confirmed by both Tranco
+    and the Radar bucket, then fill to N in Tranco rank order."""
+    ranked = None; used = None
+    for s_ in [x.strip() for x in C["SOURCES"].split(",")]:
+        try:
+            if s_ == "tranco": ranked = src_tranco()
+            elif s_ == "umbrella": ranked = src_umbrella()
+            else: continue
+            if ranked: used = s_; break
+        except Exception as e: log(f"source {s_} failed: {e}")
+    if not ranked: raise SystemExit("no top list available (tranco/umbrella)")
+    de100, bucket = [], set()
+    try: de100, bucket = src_radar()
+    except Exception as e: log(f"radar failed: {e}")
+    top_de = int(C["TOP_DE"]); top_intl = int(C["TOP_INTL"])
+    de = [clean(d) for d in de100]; de = [d for d in de if d]
+    intl_conf, intl_rest, tld_out = [], [], 0
+    for d in ranked:
+        c = clean(d)
+        if not c: continue
+        if c.endswith(".de"):
+            if top_de == 0 or len(de) < top_de: de.append(c)
+        elif not intl_tld_ok(c): tld_out += 1          # filter before truncating to fill TOP_INTL from the remaining names
+        elif bucket and c in bucket: intl_conf.append(c)
+        else: intl_rest.append(c)
+    intl = (intl_conf + intl_rest)[:top_intl] if bucket else intl_rest[:top_intl]
+    tld_info = (f"; TLD-{'Whitelist' if INTL_WHITELIST else 'Blacklist'} ({len(INTL_TLDS)} TLDs, {tld_out} excluded)"
+                if INTL_TLDS else "")
+    n1 = write_list("general-de.txt", de, f"German domains: Radar DE top 100 ({len(de100)}) + all .de names from {used}")
+    n2 = write_list("general-intl.txt", intl, f"International top {top_intl} from {used}" + (f"; {min(len(intl_conf),top_intl)} confirmed by Cloudflare bucket" if bucket else " (Radar: no token)") + tld_info)
+    log(f"general: de={n1} intl={n2} source={used} radar_de100={len(de100)} bucket={len(bucket)} confirmed={len(intl_conf)} tld_excluded={tld_out}")
+
+# ---------- network learning (FTL) ----------
+def ftl(sql, params=()):
+    con = sqlite3.connect(f"file:{C['FTL_DB']}?mode=ro", uri=True); con.execute("PRAGMA query_only=1")
+    try: return con.execute(sql, params).fetchall()
+    finally: con.close()
+
+ALLOWED_STATUS = "(2,3,12,13,14,17)"   # forwarded, cache, retried, retried-ignored, special, cache-stale
+def build_network():
+    now = int(time.time()); learn = now - int(C["LEARN_DAYS"]) * 86400
+    rows = ftl(f"""SELECT d.domain, COUNT(*) c, MAX(q.timestamp) last, COUNT(DISTINCT q.client) clients
+                   FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+                   WHERE q.timestamp > ? AND q.status IN {ALLOWED_STATUS} AND q.type IN (1,28,5,65)
+                   GROUP BY d.domain""", (learn,))
+    learned, recent, frequent = [], [], []
+    rec_cut = now - int(C["RECENT_HOURS"]) * 3600; fdays = int(C["FREQUENT_DAYS"]); fmin = int(C["FREQUENT_MIN_PER_DAY"])
+    freq_rows = {r[0]: r[1] for r in ftl(f"""SELECT d.domain, COUNT(*) FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+                   WHERE q.timestamp > ? AND q.status IN {ALLOWED_STATUS} AND q.type IN (1,28) GROUP BY d.domain""", (now - fdays * 86400,))}
+    for dom, c, last, clients in rows:
+        d = clean(dom)
+        if not d: continue
+        learned.append(d)
+        if last >= rec_cut: recent.append(d)
+        if freq_rows.get(dom, 0) >= fmin * fdays: frequent.append(d)
+    # Exclude current gravity/denylist entries from preload, but keep them visible
+    blocked = set()
+    try:
+        g = sqlite3.connect(f"file:{C['GRAVITY_DB']}?mode=ro", uri=True)
+        grav = {r[0] for r in g.execute("SELECT domain FROM gravity")}
+        deny = {r[0] for r in g.execute("SELECT domain FROM domainlist WHERE type=1 AND enabled=1")}
+        g.close()
+        def is_blocked(d):
+            if d in deny or d in grav or ("||" + d + "^") in grav: return True
+            parts = d.split(".")
+            return any(("||" + ".".join(parts[i:]) + "^") in grav for i in range(1, len(parts) - 1))
+        blocked = {d for d in learned if is_blocked(d)}
+    except Exception as e: raise SystemExit(f"gravity check failed — update aborted to avoid preloading blocked domains: {e}")
+    learned = [d for d in learned if d not in blocked]
+    n = write_list("network-learned.txt", learned, f"Allowed network queries in the last {C['LEARN_DAYS']} days (Pi-hole FTL DB)")
+    write_list("network-recent.txt", [d for d in recent if d not in blocked], f"Subset: last {C['RECENT_HOURS']} h (for the afternoon run)")
+    write_list("network-frequent.txt", [d for d in frequent if d not in blocked], f"Subset: >= {fmin}/day over {fdays} days")
+    write_list("network-blocked-excluded.txt", blocked, "Learned but blocked -> NOT preloaded (visible for overblocking review)")
+    log(f"network: learned={n} recent={len(recent)} frequent={len(frequent)} blocked_excluded={len(blocked)}")
+
+def build_cname_targets():
+    """CNAME targets for learned domains (CDN chains), to warm the whole chain."""
+    # FTL stores queries, not answers, so CNAME targets cannot be inferred.
+    # unbound resolves and caches the entire CNAME chain when preloading a domain.
+    # Keep this list empty as a placeholder for manually maintained CDN targets.
+    n = write_list("cname-targets.txt", [], "CNAME targets: empty — unbound caches the chain when preloading the source domain; manual additions only")
+    log(f"cname-targets: {n}")
+
+def build_merged():
+    excl = set(read_list("exclude.txt"))
+    paused = load_paused()
+    src = {}
+    for name in ("general-de.txt", "general-intl.txt", "network-learned.txt", "cname-targets.txt", "static-manual.txt"):
+        for d in read_list(name):
+            if d and d not in excl and d not in paused: src.setdefault(d, name)
+    n = write_list("merged-final.txt", src.keys(), "ONLY preload file. Sources: " +
+                   ", ".join(f"{k}={sum(1 for v in src.values() if v==k)}" for k in sorted(set(src.values()))))
+    net = set(read_list("network-learned.txt"))
+    lines = [f"{d} A\n" for d in sorted(src)] + [f"{d} AAAA\n" for d in sorted(src) if d in net]   # AAAA only for domains used by the network
+    tmp = LISTS / "merged-final.dnsperf.tmp"; tmp.write_text("".join(lines)); os.replace(tmp, LISTS / "merged-final.dnsperf")
+    log(f"merged-final: {n} (exclude={len(excl)} paused={len(paused)})"); return n
+
+# ---------- servfail pause ----------
+def load_paused():
+    p = STATE / "servfail-paused.json"
+    if not p.exists(): return set()
+    d = json.loads(p.read_text()); now = time.time()
+    return {k for k, until in d.items() if until > now}
+
+def record_servfails(domains):
+    p = STATE / "servfail-paused.json"; d = json.loads(p.read_text()) if p.exists() else {}
+    until = time.time() + int(C["SERVFAIL_PAUSE_DAYS"]) * 86400
+    for x in domains: d[x] = until
+    d = {k: v for k, v in d.items() if v > time.time()}
+    p.write_text(json.dumps(d, indent=1)); return len(d)
+
+def find_servfail_domains(dnsperf_file, limit=3000):
+    """dnsperf reports totals only. Recheck individual domains with dig (A only,
+    cached replies take about 1 ms) to find SERVFAILs. Check at most 'limit'
+    domains per run so the recheck does not outlast the preload."""
+    doms = sorted({l.split()[0] for l in open(dnsperf_file) if l.strip()})
+    bad = []
+    import concurrent.futures as cf
+    def q(d):
+        r = subprocess.run(["dig", "+short", "+comments", "+time=3", "+tries=1", "-p", C["UNBOUND_PORT"], "@" + C["UNBOUND"], d, "A"], capture_output=True, text=True)
+        return d if "status: SERVFAIL" in r.stdout else None
+    with cf.ThreadPoolExecutor(16) as ex:
+        for x in ex.map(q, doms[:limit]):
+            if x: bad.append(x)
+    return bad
+
+# ---------- preload ----------
+def unbound_stat(key):
+    try:
+        out = subprocess.run(["sudo", "-n", "unbound-control", "stats_noreset"], capture_output=True, text=True, timeout=20).stdout
+        for l in out.splitlines():
+            if l.startswith(key + "="): return float(l.split("=", 1)[1])
+    except Exception: pass
+    return None
+
+def do_preload(mode):
+    if mode == "network":
+        doms = [d for d in read_list("network-recent.txt") + read_list("network-frequent.txt") if d]
+        f = STATE / "network-run.dnsperf"; f.write_text("".join(f"{d} A\n{d} AAAA\n" for d in sorted(set(doms))))
+    elif mode == "slice":
+        f, slot, slices = slice_file()
+    else:
+        f = LISTS / "merged-final.dnsperf"
+        if not f.exists(): build_merged()
+    qps = C["SLICE_QPS"] if mode == "slice" else C["QPS"]
+    n = sum(1 for _ in open(f)); before = unbound_stat("msg.cache.count"); t0 = time.time()
+    if n == 0:
+        log(f"preload {mode}: empty slice, nothing to do"); return {"mode": mode, "domains": 0}
+    cmd = ["dnsperf", "-s", C["UNBOUND"], "-p", C["UNBOUND_PORT"], "-d", str(f), "-Q", qps, "-t", C["DNSPERF_TIMEOUT"], "-c", "30", "-S", "5"]
+    log(f"preload {mode}: {n} domains, QPS={qps}" + (f", slice {slot + 1}/{slices}" if mode == "slice" else ""))
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=n / max(1, int(qps)) * 2 + 120)
+    m = {k: v for k, v in re.findall(r"^\s*(Queries (?:sent|completed|lost)|Response codes|Average Latency \(s\)):\s+(.+)$", r.stdout, re.M)}
+    dur = round(time.time() - t0, 1); after = unbound_stat("msg.cache.count")
+    res = {"mode": mode, "time": time.strftime("%Y-%m-%d %H:%M"), "domains": n, "qps": int(qps), "duration_s": dur,
+           "sent": m.get("Queries sent"), "completed": m.get("Queries completed"), "lost": m.get("Queries lost"),
+           "rcodes": m.get("Response codes"), "latency": m.get("Average Latency (s)"),
+           "cache_before": before, "cache_after": after, "rc": r.returncode}
+    if mode == "slice": res.update(slot=slot + 1, slices=slices)
+    if r.returncode != 0 or not m.get("Queries completed"):
+        log(f"dnsperf ERROR rc={r.returncode}: {r.stderr.strip()[:300]}"); (STATE / "last-run.json").write_text(json.dumps(res, indent=1)); raise SystemExit(2)
+    sf = re.search(r"SERVFAIL (\d+)", m.get("rcodes", "") or "")
+    if sf and int(sf.group(1)) > 0 and mode in ("full", "slice"):
+        bad = find_servfail_domains(f); npaused = record_servfails(bad); res["servfail_domains"] = len(bad)
+        log(f"servfail: {int(sf.group(1))} replies, {len(bad)} domains identified, {npaused} paused ({C['SERVFAIL_PAUSE_DAYS']} days)")
+        if bad: build_merged()
+    (STATE / "last-run.json").write_text(json.dumps(res, indent=1))
+    with open(STATE / "history.csv", "a") as h:
+        if h.tell() == 0: h.write("time,mode,domains,qps,duration_s,completed,lost,cache_before,cache_after\n")
+        h.write(f"{res['time']},{mode},{n},{qps},{dur},{(res['completed'] or '').split()[0]},{(res['lost'] or '').split()[0]},{before},{after}\n")
+    log(f"preload {mode} finished: {dur}s completed={res['completed']} lost={res['lost']} cache {before}->{after}")
+    return res
+
+def slice_of(domain, slices):
+    """Stable hourly slice per name: checksum, not Python's randomly salted hash()."""
+    return zlib.crc32(domain.encode()) % slices
+
+def slice_file(now=None):
+    """Write the current hourly slice, keeping each name's A and AAAA records together."""
+    slices = max(1, int(C["SLICE_HOURS"]))
+    slot = int((time.time() if now is None else now) // 3600) % slices
+    src = LISTS / "merged-final.dnsperf"
+    if not src.exists(): build_merged()
+    lines = [l for l in open(src) if l.strip() and slice_of(l.split()[0], slices) == slot]
+    f = STATE / "slice-run.dnsperf"; tmp = f.with_suffix(".tmp"); tmp.write_text("".join(lines)); os.replace(tmp, f)
+    return f, slot, slices
+
+# ---------- status / report ----------
+def do_status():
+    lr = json.loads((STATE / "last-run.json").read_text()) if (STATE / "last-run.json").exists() else {}
+    cache = unbound_stat("msg.cache.count"); hits = unbound_stat("total.num.cachehits"); q = unbound_stat("total.num.queries")
+    pf = unbound_stat("total.num.prefetch"); exp = unbound_stat("total.num.expired")
+    print("dnspreload v2 — status", time.strftime("%Y-%m-%d %H:%M"))
+    print(f"  unbound cache: {int(cache) if cache else '?'} entries | hit-rate {round(hits/q*100,1) if q else '?'} % | prefetch {int(pf) if pf else '?'} | serve-expired {int(exp) if exp else '?'} (since unbound started)")
+    print(f"  last run: {lr.get('time','-')} {lr.get('mode','')} {lr.get('domains','')} domains in {lr.get('duration_s','')}s, completed {lr.get('completed','-')}, lost {lr.get('lost','-')}")
+    for name in ("general-de", "general-intl", "network-learned", "network-recent", "network-frequent", "cname-targets", "static-manual", "exclude", "network-blocked-excluded", "merged-final"):
+        p = LISTS / f"{name}.txt"; n = len(read_list(p.name)) if p.exists() else 0
+        age = f"{(time.time()-p.stat().st_mtime)/3600:.0f}h" if p.exists() else "-"
+        print(f"  {name:26} {n:>7}  (age {age})")
+    paused = load_paused(); print(f"  servfail-paused:           {len(paused):>7}")
+    # Cache sample: how many learned domains are currently cached?
+    try:
+        dump = subprocess.run(["sudo", "-n", "unbound-control", "dump_cache"], capture_output=True, text=True, timeout=60).stdout
+        cached = {l.split()[0].rstrip(".") for l in dump.splitlines() if l and not l.startswith(("START", "END", ";")) and "\tIN\t" in l}
+        for name in ("network-learned", "general-de", "general-intl"):
+            ds = [d for d in read_list(name + ".txt") if d]
+            if ds: print(f"  cached: {name:18} {sum(1 for d in ds if d in cached)}/{len(ds)}")
+    except Exception as e: print("  cache sample:", e)
+
+def do_report():
+    """Weekly overblocking/underblocking candidates and preload stats -> state/report-YYYY-WW.md."""
+    now = int(time.time()); week = now - 7 * 86400
+    # Overblocking: many blocks from few devices, retries or daily use, functional names
+    ob = ftl("""SELECT d.domain, COUNT(*) c, COUNT(DISTINCT q.client) cl, COUNT(DISTINCT date(q.timestamp,'unixepoch')) days
+                FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+                WHERE q.timestamp > ? AND q.status IN (1,4,5,6,7,8,9,10,11,15,16)
+                GROUP BY d.domain HAVING c >= 50 ORDER BY c DESC LIMIT 300""", (week,))
+    func = re.compile(r"^(api|cdn|static|img|image|images|login|auth|media|assets|content|files|dl|download|update|updates|app|apps|ws|api\d*|edge|s\d+)\.|\.(cloudfront|akamaized|fastly|edgesuite|cdn77|cloudflare)\.")
+    ob_cands = [(d, c, cl, days, "functional" if func.search(d) else "daily" if days >= 6 else "") for d, c, cl, days in ob if func.search(d) or days >= 6][:25]
+    # Underblocking: allowed tracker names, multiple devices, absent from gravity
+    ub = ftl(f"""SELECT d.domain, COUNT(*) c, COUNT(DISTINCT q.client) cl
+                 FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+                 WHERE q.timestamp > ? AND q.status IN {ALLOWED_STATUS}
+                 GROUP BY d.domain HAVING cl >= 2 ORDER BY c DESC LIMIT 2000""", (week,))
+    trk = re.compile(r"(^|\.)(telemetry|metrics|analytics|collect|collector|beacon|track|tracking|tracker|pixel|adsrv|ads|adserver|stats|stat|log|logs|events|event|report|reports|crash|sentry|insights|measure|tag|tags|tagmanager|doubleclick|adjust|appsflyer|branch|mixpanel|segment|amplitude|hotjar|fullstory|clarity|newrelic|datadog|bugsnag)\.")
+    ub_cands = [(d, c, cl) for d, c, cl in ub if trk.search(d)][:25]
+    lr = json.loads((STATE / "last-run.json").read_text()) if (STATE / "last-run.json").exists() else {}
+    wk = time.strftime("%Y-W%V"); out = STATE / f"report-{wk}.md"
+    L = [f"# DNS weekly report {wk} ({os.uname().nodename})", "",
+         f"Last preload: {lr.get('time','-')} — {lr.get('domains','-')} domains, completed {lr.get('completed','-')}, lost {lr.get('lost','-')}, Cache {lr.get('cache_before','-')}→{lr.get('cache_after','-')}", "",
+         "## Overblocking candidates (blocked, functional name or daily use) — suggestion: allow?", "",
+         "| Domain | Blocks/week | Devices | Days | Reason |", "|---|---|---|---|---|"] + \
+        [f"| {d} | {c} | {cl} | {days} | {why} |" for d, c, cl, days, why in ob_cands] + \
+        ["", "## Underblocking candidates (allowed, tracker pattern, multiple devices, absent from lists) — suggestion: deny?", "",
+         "| Domain | Queries/week | Devices |", "|---|---|---|"] + [f"| {d} | {c} | {cl} |" for d, c, cl in ub_cands] + \
+        ["", "_No automatic changes. Reply “allow X” / “deny Y” → lists/allow-local.txt or deny-local.txt._"]
+    out.write_text("\n".join(L) + "\n"); print(out); log(f"report {wk}: overblock={len(ob_cands)} underblock={len(ub_cands)}")
+
+# ---------- main ----------
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    import fcntl
+    if cmd in ("update", "preload", "report"):
+        _lock = open(STATE / ".lock", "w")
+        try: fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: raise SystemExit("another dnspreload run is active — aborted")
+    if cmd == "update":
+        build_general(); build_network(); build_cname_targets(); build_merged()
+    elif cmd == "preload":
+        do_preload(sys.argv[2] if len(sys.argv) > 2 else "full")
+    elif cmd == "status": do_status()
+    elif cmd == "report": do_report()
+    else: raise SystemExit(__doc__)

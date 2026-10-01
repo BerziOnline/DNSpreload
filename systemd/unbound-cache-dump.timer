@@ -1,0 +1,9 @@
+[Unit]
+Description=unbound: save cache every 6 h
+
+[Timer]
+OnCalendar=*-*-* 00/6:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

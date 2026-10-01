@@ -1,0 +1,9 @@
+[Unit]
+Description=dnspreload blocking monitor: compute overblocking/underblocking candidates
+After=pihole-FTL.service
+[Service]
+Type=oneshot
+User=dnspreload
+ExecStart=/usr/local/bin/dnspreload-blockmon scan
+Nice=10
+IOSchedulingClass=idle

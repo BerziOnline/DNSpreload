@@ -1,0 +1,26 @@
+{
+ "network-ads": {
+  "group": "-",
+  "mode": "blocking",
+  "label": "Ad blocker",
+  "scope": "whole network",
+  "presets": [30, 120],
+  "max": 240,
+  "roles": ["admin"],
+  "kind": "full",
+  "devices": []
+ },
+ "kids-ads": {
+  "group": "kids-ads",
+  "label": "Ad blocker",
+  "scope": "kids' devices",
+  "presets": [30, 120],
+  "max": 240,
+  "roles": ["family"],
+  "kind": "full",
+  "devices": [
+   {"ip": "192.168.1.50", "name": "Tablet", "icon": "phone"},
+   {"ip": "192.168.1.51", "name": "Laptop", "icon": "laptop"}
+  ]
+ }
+}

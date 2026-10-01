@@ -1,0 +1,1 @@
+dnspreload ALL=(root) NOPASSWD: /usr/local/bin/dnspreload-token add admin *, /usr/local/bin/dnspreload-token add family *, /usr/local/bin/dnspreload-token revoke [0-9]*

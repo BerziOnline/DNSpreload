@@ -1,0 +1,12 @@
+[Unit]
+Description=dnspreload: turn all switches off at boot (fail-safe; group flags persist across reboots)
+After=pihole-FTL.service
+Requires=pihole-FTL.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do curl -sf http://127.0.0.1/api/info/login >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/local/bin/dnspreload-switch all off
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=unbound: save the cache to disk every 6 h (warm start even after a crash; loaded by unbound-cache-load)
+After=network-online.target unbound.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/unbound-cache-dump
+Nice=10

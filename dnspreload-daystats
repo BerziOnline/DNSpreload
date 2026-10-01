@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""dnspreload-daystats — Hourly FTL statistics for app/panel -> state/daystats.json.
+Device view only: exclude SYSTEM_CLIENTS (preload, server, gateway) to avoid skewing counts.
+Includes 90 daily query/block totals, today's devices, blocking streak, record day,
+and total blocks since STATS_SINCE.
+"""
+import json, os, sqlite3, time
+from pathlib import Path
+BASE = Path(os.environ.get("DNSPRELOAD_HOME", "/opt/dnspreload-v2")); STATE = BASE / "state"
+
+def _setting(key, default):
+    """Setting precedence: environment > config.env in the program directory > default."""
+    if os.environ.get(key): return os.environ[key]
+    p = BASE / "config.env"
+    if p.exists():
+        for line in p.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line.startswith(key + "="): return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return default
+FTL_DB = os.environ.get("FTL_DB", "/etc/pihole/pihole-FTL.db")
+BLOCKED = "(1,4,5,6,7,8,9,10,11,16)"
+SYSTEM = tuple(x.strip() for x in _setting("SYSTEM_CLIENTS", "127.0.0.1").split(",") if x.strip())
+FLOOR = int(_setting("STATS_SINCE", "0"))   # Unix timestamp: count from here, excluding imported history with different blocklists
+EXCL = "q.client NOT IN (SELECT id FROM client_by_id WHERE ip IN (%s))" % ",".join("'%s'" % c for c in SYSTEM)
+
+def main():
+    con = sqlite3.connect(f"file:{FTL_DB}?mode=ro", uri=True, timeout=30)
+    now = time.time(); t90 = int(now - 90 * 86400)
+    days = con.execute(f"""SELECT date(q.timestamp,'unixepoch','localtime') d, COUNT(*) n, SUM(q.status IN {BLOCKED}) b FROM query_storage q
+        WHERE q.timestamp>=? AND {EXCL} GROUP BY d ORDER BY d""", (t90,)).fetchall()
+    today0 = int(time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d")))
+    clients = con.execute(f"""SELECT c.ip, COALESCE(NULLIF(c.name,''), c.ip) name, COUNT(*) n, SUM(q.status IN {BLOCKED}) b FROM query_storage q JOIN client_by_id c ON c.id=q.client
+        WHERE q.timestamp>=? AND {EXCL} GROUP BY c.ip ORDER BY b DESC LIMIT 12""", (today0,)).fetchall()
+    total_since = con.execute(f"SELECT COUNT(*), SUM(q.status IN {BLOCKED}) FROM query_storage q WHERE q.timestamp>=? AND {EXCL}", (FLOOR,)).fetchone()
+    top_today = con.execute(f"""SELECT d.domain, COUNT(*) n FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE q.timestamp>=? AND q.status IN {BLOCKED} AND {EXCL}
+        GROUP BY d.domain ORDER BY n DESC LIMIT 8""", (today0,)).fetchall()
+    # --- Device caching: Pi-hole (status 3) + unbound (status 2, reply < 5 ms) = instant; recursive = status 2, >= 5 ms
+    def cache_rows(since):
+        return con.execute(f"""SELECT date(q.timestamp,'unixepoch','localtime') d,
+            SUM(q.status=3 OR (q.status=2 AND q.reply_time<0.005)) instant, SUM(q.status=2 AND q.reply_time>=0.005) recursive, SUM(q.status IN (2,3)) total,
+            SUM(CASE WHEN q.status=2 AND q.reply_time>=0.005 THEN q.reply_time ELSE 0 END) rec_time
+            FROM query_storage q WHERE q.timestamp>=? AND q.status IN (2,3) AND {EXCL} GROUP BY d ORDER BY d""", (since,)).fetchall()
+    cdays = [{"day": r[0], "instant": r[1] or 0, "recursive": r[2] or 0, "total": r[3] or 0, "hit_percent": round(100.0 * (r[1] or 0) / r[3], 1) if r[3] else 0.0,
+              "avg_recursive_ms": round(1000.0 * r[4] / r[2], 1) if r[2] else None} for r in cache_rows(max(t90, FLOOR))]
+    top_cached = con.execute(f"""SELECT d.domain, COUNT(*) n FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE q.timestamp>=? AND (q.status=3 OR (q.status=2 AND q.reply_time<0.005)) AND {EXCL}
+        GROUP BY d.domain ORDER BY n DESC LIMIT 10""", (today0,)).fetchall()
+    top_missed = con.execute(f"""SELECT d.domain, COUNT(*) n, ROUND(1000*AVG(q.reply_time),1) ms FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE q.timestamp>=? AND q.status=2 AND q.reply_time>=0.005 AND {EXCL}
+        GROUP BY d.domain ORDER BY n DESC LIMIT 10""", (today0,)).fetchall()
+    slowest = con.execute(f"""SELECT d.domain, ROUND(1000*q.reply_time,1) ms, datetime(q.timestamp,'unixepoch','localtime') t FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE q.timestamp>=? AND q.status IN (2,3) AND {EXCL}
+        ORDER BY q.reply_time DESC LIMIT 5""", (today0,)).fetchall()
+    bands = con.execute(f"""SELECT SUM(q.reply_time<0.001), SUM(q.reply_time>=0.001 AND q.reply_time<0.005), SUM(q.reply_time>=0.005 AND q.reply_time<0.05), SUM(q.reply_time>=0.05 AND q.reply_time<0.2), SUM(q.reply_time>=0.2)
+        FROM query_storage q WHERE q.timestamp>=? AND q.status IN (2,3) AND {EXCL}""", (today0,)).fetchone()
+    # --- Per device today: top 3 blocked and top 3 used domains
+    per_client = {}
+    for ip, *_ in clients:
+        tb = con.execute(f"SELECT d.domain, COUNT(*) FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE q.client IN (SELECT id FROM client_by_id WHERE ip=?) AND q.timestamp>=? AND q.status IN {BLOCKED} GROUP BY 1 ORDER BY 2 DESC LIMIT 3", (ip, today0)).fetchall()
+        tu = con.execute(f"SELECT d.domain, COUNT(*) FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE q.client IN (SELECT id FROM client_by_id WHERE ip=?) AND q.timestamp>=? AND q.status NOT IN {BLOCKED} GROUP BY 1 ORDER BY 2 DESC LIMIT 3", (ip, today0)).fetchall()
+        per_client[ip] = {"top_blocked": [{"domain": a, "n": b} for a, b in tb], "top_used": [{"domain": a, "n": b} for a, b in tu]}
+    con.close()
+    dl = [{"day": d, "queries": n, "blocked": b or 0, "percent": round(100.0 * (b or 0) / n, 1) if n else 0.0} for d, n, b in days]
+    # Streak: consecutive days through today with at least one block; record: day with the most blocks
+    streak = 0
+    for e in reversed(dl):
+        if e["blocked"] > 0: streak += 1
+        else: break
+    record = max(dl, key=lambda e: e["blocked"]) if dl else None
+    out = {"time": int(now), "days": dl[-90:], "streak_days": streak, "record": record,
+           "since": {"from": FLOOR, "queries": total_since[0] or 0, "blocked": total_since[1] or 0},
+           "today_clients": [{"ip": ip, "name": nm, "queries": n, "blocked": b or 0} for ip, nm, n, b in clients],
+           "today_top_blocked": [{"domain": d, "n": n} for d, n in top_today],
+           "per_client": per_client,
+           "cache": {"days": cdays, "today_bands": {"<1ms": bands[0] or 0, "1-5ms": bands[1] or 0, "5-50ms": bands[2] or 0, "50-200ms": bands[3] or 0, ">200ms": bands[4] or 0},
+                     "top_cached": [{"domain": a, "n": b} for a, b in top_cached], "top_missed": [{"domain": a, "n": b, "avg_ms": c} for a, b, c in top_missed],
+                     "slowest": [{"domain": a, "ms": b, "time": c} for a, b, c in slowest],
+                     "record_day": max(cdays, key=lambda e: e["hit_percent"]) if cdays else None}}
+    STATE.mkdir(parents=True, exist_ok=True); p = STATE / "daystats.json"; tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(out, ensure_ascii=False)); os.replace(tmp, p)
+    print(f"{len(dl)} days, streak {streak}, {len(clients)} devices today")
+
+if __name__ == "__main__": main()

@@ -1,0 +1,4 @@
+# Never preload. One domain per line.
+use-application-dns.net
+mask.icloud.com
+mask-h2.icloud.com

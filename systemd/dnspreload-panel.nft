@@ -1,0 +1,10 @@
+#!/usr/sbin/nft -f
+# Optional: allow the panel (tcp/8053) only from trusted networks. DNS, SSH and the Pi-hole web UI are untouched.
+# Adjust the address set to your LAN / admin VLAN / VPN, then: install -m 644 this file /etc/nftables.d/ and include it.
+table inet dnspreload_panel {
+  chain input {
+    type filter hook input priority 0; policy accept;
+    tcp dport 8053 ip saddr { 127.0.0.0/8, 192.168.1.0/24 } accept
+    tcp dport 8053 drop
+  }
+}

@@ -1,0 +1,709 @@
+#!/usr/bin/env python3
+"""DNSpreload v2: mobile-first web panel and metrics exporter.
+
+The panel reads state, lists, unbound statistics and read-only Pi-hole databases.
+Metrics use InfluxDB line protocol for Telegraf/Grafana, on a five-minute timer.
+Restrict access to admin networks with the panel firewall rules.
+Each row answers one question with a short, unwrapped value and status dot.
+Each section ends with one next step or a no-action message.
+"""
+import json, re, urllib.parse, os, sqlite3, subprocess, sys, time, html
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+BASE = Path(os.environ.get("DNSPRELOAD_HOME", Path(__file__).resolve().parent))
+LISTS, STATE = BASE / "lists", BASE / "state"
+
+def _setting(key, default):
+    """Setting precedence: environment, local config.env, default."""
+    if os.environ.get(key): return os.environ[key]
+    p = BASE / "config.env"
+    if p.exists():
+        for line in p.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line.startswith(key + "="): return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return default
+UI_LANG = _setting("UI_LANG", "en")
+if UI_LANG not in ("en", "de"): UI_LANG = "en"
+
+DE = {
+    "Top German domains": "Deutsche Top-Domains",
+    "Tranco, all .de domains": "Tranco, alle .de",
+    "Top international domains": "Internationale Top-Domains",
+    "by usage in Germany": "nach Nutzung in Deutschland",
+    "Seen on the network": "Im Netz gesehen",
+    "last 90 days": "letzte 90 Tage",
+    "recently active": "davon zuletzt aktiv",
+    "last 7 days": "letzte 7 Tage",
+    "used daily": "davon täglich genutzt",
+    "at least 3 times a day": "ab 3x pro Tag",
+    "excluded by blocking": "weggelassen, weil gesperrt",
+    "Pi-hole would block them": "Pi-hole würde sie blocken",
+    "Added manually": "Von Hand ergänzt",
+    "Excluded manually": "Von Hand ausgeschlossen",
+    "Total preloaded": "Vorgeladen insgesamt",
+    "domains queried by preload": "was der Preload anfragt",
+    "Update lists": "Listen aktualisieren",
+    "Slice preload (hourly)": "Fach-Preload (stündlich)",
+    "Full preload (fallback)": "Voll-Preload (Notfall)",
+    "Network preload": "Netz-Preload",
+    "Weekly report": "Wochenbericht",
+    "Save cache": "Cache sichern",
+    "Metrics": "Metriken",
+    "all domains": "alles",
+    "network domains only": "nur Netzwerk-Domains",
+    "no data": "keine Daten",
+    "never": "nie",
+    "just now": "gerade eben",
+    "overdue": "überfällig",
+    "not yet": "noch nie",
+    "one hourly slice": "ein Stundenfach",
+    "DNS answers queries": "DNS beantwortet Anfragen",
+    "Failures": "Störungen",
+    "systemd services in this stack": "systemd-Dienste dieses Stacks",
+    "Preload list up to date": "Vorgeladene Liste aktuell",
+    "Response speed": "Antwortgeschwindigkeit",
+    "Next runs": "Nächste Läufe",
+    "Lists": "Listen",
+    "on": "an",
+    "State": "Zustand",
+    "Blocking suggestions": "Blocking-Vorschläge",
+    "When you have time: domains that may be overblocked or underblocked.": "Bei Muße: Domains, die vermutlich zu viel oder zu wenig gesperrt sind.",
+    "yes": "ja",
+    "NO": "NEIN",
+    "unknown": "unbekannt",
+    "List missing": "Liste fehlt",
+    "No action needed.": "Keine Maßnahme nötig.",
+    "Check journalctl -u <service> on the DNS server.": "journalctl -u <Dienst> auf dem DNS-Server prüfen.",
+    "Queries today": "Anfragen heute",
+    "blocked queries": "davon gesperrt",
+    "Ads, trackers, malware": "Werbung, Tracker, Schadsoftware",
+    "Blocklist": "Sperrliste",
+    "Today": "Heute",
+    "Status incomplete — check the data source.": "Status unvollständig — Datenquelle prüfen.",
+    "Answered instantly": "Sofort beantwortet",
+    "Queried upstream": "Im Internet nachgefragt",
+    "over 50 ms · cache empty or expired": "über 50 ms · Cache leer oder abgelaufen",
+    "Typical response time": "Typische Antwortzeit",
+    "Today's median for devices": "Median heute, aus Gerätesicht",
+    "Cache entries": "Einträge im Cache",
+    "unbound, including preloaded entries": "unbound, inkl. vorgeladene",
+    "Refreshed in background": "Im Hintergrund erneuert",
+    "Prefetch before entries expire": "Prefetch, bevor Einträge ablaufen",
+    "Expired entries served instantly": "Abgelaufen sofort geliefert",
+    "then refreshed in background": "und danach im Hintergrund erneuert",
+    "Upstream queries": "Nachfragen im Internet",
+    "Average for cache misses": "Durchschnitt, wenn nicht im Cache",
+    "unbound uptime": "unbound läuft seit",
+    "not responding": "antwortet nicht",
+    "No readable statistics": "keine Statistik lesbar",
+    "When": "Wann",
+    "What": "Was",
+    "Answered": "Beantwortet",
+    "The rest are dead domains": "Rest sind tote Domains",
+    "Cache after preload": "Cache danach",
+    "Entries before → after": "Einträge vorher → nachher",
+    "Paused after errors": "Pausiert wegen Fehlern",
+    "Automatically retried after 7 days": "nach 7 Tagen automatisch wieder dabei",
+    "Last preload": "Letzter Preload",
+    "First run: dnspreload preload slice (hourly timer).": "Erster Lauf: dnspreload preload slice (stündlich per Timer).",
+    "Automatic systemd timers.": "Automatisch per systemd-Timer.",
+    "Rebuilt daily at 03:50.": "Werden täglich um 03:50 neu gebaut.",
+    "A list is older than 30 h — check the list update.": "Eine Liste ist älter als 30 h — Listen-Update prüfen.",
+    "for your devices": "für deine Geräte",
+    "No switch": "Kein Schalter",
+    "Ask your admin.": "Admin fragen.",
+    "Test query through Pi-hole failed": "Testanfrage über Pi-hole fehlgeschlagen",
+    "unbound or Pi-hole stopped": "unbound oder Pi-hole gestoppt",
+    "none": "keine",
+    "no": "nein",
+    "under 1 ms": "unter 1 ms",
+    "No device queries yet today": "Noch keine Geräte-Anfragen heute",
+    "Device queries": "Geräte-Anfragen",
+    "unreadable": "nicht lesbar",
+    "Pi-hole data missing": "Pi-hole-Daten fehlen",
+    "Check unbound.": "unbound prüfen.",
+    "Small cache or low hit rate — the next full preload will refill it.": "Cache klein oder Trefferquote niedrig — nächster Voll-Preload füllt ihn.",
+    "Under 98 % answered — check logs/ and last-run.json.": "Unter 98 % beantwortet — logs/ und last-run.json prüfen.",
+    "History": "Verlauf",
+    "Domains and duration per run; details in state/history.csv.": "Domains und Dauer je Lauf; Details in state/history.csv.",
+    "A timer is overdue — check systemctl list-timers.": "Ein Timer ist überfällig — systemctl list-timers prüfen.",
+    "Check systemctl list-timers.": "systemctl list-timers prüfen.",
+    "Turns back on automatically.": "Schaltet sich von selbst wieder ein.",
+    "Recommendation: allow": "Empfehlung: gestatten",
+    "Recommendation: block": "Empfehlung: sperren",
+    "Recommendation: keep as is": "Empfehlung: so lassen",
+    "Allow": "Gestatten",
+    "Dismiss": "Verwerfen",
+    "Later": "Später",
+    "Block": "Sperren",
+    "Admins only.": "Nur für Admin.",
+    "access denied": "kein Zugang",
+    "Invalid input.": "Ungültige Eingabe.",
+    "not available": "nicht freigegeben",
+    "most blocked domain": "häufigste gesperrte Domain",
+    "Blocklist almost empty — run pihole -g.": "Sperrliste fast leer — pihole -g ausführen.",
+    "Blocklist older than 8 days — run pihole -g.": "Sperrliste älter als 8 Tage — pihole -g ausführen.",
+    "Pi-hole data": "Pi-hole-Daten",
+    "No read access to pihole-FTL.db": "Leserecht auf pihole-FTL.db fehlt",
+    "No runs yet": "Noch kein Lauf",
+    "Partial: Google Ads domains only": "Teilweise: nur Google-Ads-Domains",
+    "Full: all blocklists": "Vollständig: alle Sperrlisten",
+    " — turns back on automatically.": " — schaltet sich von selbst wieder ein.",
+    "For this account": "Für dieses Konto",
+    "no switches available": "nichts freigegeben",
+    "Invalid link.": "Ungültiger Link.",
+    "Access denied. Use the link from your admin.": "Kein Zugang. Link vom Admin verwenden.",
+    "admin only": "nur admin",
+    "Role admin|family, label 1-40 characters": "Rolle admin|family, Bezeichnung 1-40 Zeichen",
+    "last admin token": "letzter Admin-Token",
+    "reviews missing": "reviews fehlt",
+    "allowed": "gestattet",
+    "blocked": "gesperrt",
+    "dismissed": "verworfen",
+    "later": "später",
+    "Slice {slot} of {slices}": "Fach {slot} von {slices}",
+    "{n} min ago": "vor {n} min",
+    "{n} h ago": "vor {n} h",
+    "{n} days ago ({date})": "vor {n} Tagen ({date})",
+    "Test query through Pi-hole in {ms} ms": "Testanfrage über Pi-hole in {ms} ms",
+    "As of {date}": "Stand {date}",
+    "from {n} devices": "von {n} Geräten",
+    "{n} domains": "{n} Domains",
+    "updated {ago}": "aktualisiert {ago}",
+    "under 5 ms · {n} device queries today (excluding server, gateway, preload)": "unter 5 ms · von {n} Geräte-Anfragen heute (ohne Server, Gateway, Preload)",
+    "{n} queries including preload, SERVFAIL {fail}": "{n} Anfragen inkl. Preload, SERVFAIL {fail}",
+    "Unreadable time: {t}": "Zeit nicht lesbar: {t}",
+    "{n} domains in {duration}": "{n} Domains in {duration}",
+    "off · {n} min left": "aus · noch {n} min",
+    "back on at {clock}": "wieder an um {clock} Uhr",
+    "{devices} devices · {queries} queries": "{devices} Geräte · {queries} Anfragen",
+    " · Lists {lists}": " · Listen {lists}",
+    " · {pending} awaiting review · {dropped} dropped": " · {pending} warten auf Einordnung · {dropped} aussortiert",
+    "turn back on": "wieder einschalten",
+    "off for {m} min": "{m} min aus",
+    "off for {n} h": "{n} h aus",
+    "off · ": "aus · noch ",
+    "View suggestions": "Vorschläge ansehen",
+    "Admin and server VLAN": "Admin- und Server-VLAN",
+    "Raw data": "Rohdaten",
+    "Ad blocker": "Werbeblocker",
+    "Bookmark this page.": "Diese Seite als Lesezeichen speichern.",
+    "If blocked: ": "Bei Sperre: ",
+    " · Score {score}": " · Punkte {score}",
+    "none yet": "noch keine",
+    "Candidates {ts} · Review {rts} · ": "Kandidaten {ts} · Einordnung {rts} · ",
+    "back": "zurück",
+    "Likely overblocked ({n})": "Vermutlich zu viel gesperrt ({n})",
+    "Domains that worked before the last list update, are retried in bursts by apps, or belong to the site you are visiting. “Allow” adds them to the Pi-hole allowlist.": "Domains, die vor dem letzten Listen-Update normal liefen, die Apps in Salven wiederholen oder die zur gerade besuchten Seite gehören. „Gestatten“ trägt sie in die Pi-hole-Allowlist ein.",
+    "none — all good.": "nichts — alles im Lot.",
+    "Likely underblocked ({n})": "Vermutlich zu wenig gesperrt ({n})",
+    "Allowed queries listed in Hagezi ULTIMATE or with tracking patterns in their names. “Block” adds them to the Pi-hole denylist.": "Erlaubt beantwortet, aber in Hagezi ULTIMATE oder mit Tracking-Muster im Namen. „Sperren“ trägt sie in die Pi-hole-Denylist ein.",
+    "none.": "nichts.",
+    "Recent decisions": "Letzte Entscheidungen",
+    "Calculated every 6 h without AI. Dismiss pauses for 90 days; Later for 14 days.": "Berechnet alle 6 h ohne KI. Verworfen = 90 Tage Ruhe, Später = 14 Tage."
+}
+
+def _(s):
+    """Translate an English UI message; unknown messages stay unchanged."""
+    return DE.get(s, s) if UI_LANG == "de" else s
+
+FTL_DB, GRAVITY_DB = "/etc/pihole/pihole-FTL.db", "/etc/pihole/gravity.db"
+ADMIN_NETS = tuple(x.strip() for x in _setting("ADMIN_NETS", "127.0.0.").split(",") if x.strip())   # IP prefixes grant browser admin access; firewall rules also apply.
+PANEL_TITLE = _setting("PANEL_TITLE", "DNS · Pi-hole")   # panel header, e.g. "DNS · <hostname>"
+SYSTEM_CLIENTS = tuple(x.strip() for x in _setting("SYSTEM_CLIENTS", "127.0.0.1").split(",") if x.strip())   # Exclude system traffic from device statistics.
+TOKENS = Path("/etc/dnspreload/tokens.json")          # Token roles via Bearer header, cookie or /u/<token>.
+import hashlib, http.cookies
+BLOCKED = "(1,4,5,6,7,8,9,10,11,16)"
+LIST_NAMES = {  # Filename -> (display label, description).
+    "general-de": (_('Top German domains'), _('Tranco, all .de domains')),
+    "general-intl": (_('Top international domains'), _('by usage in Germany')),
+    "network-learned": (_('Seen on the network'), _('last 90 days')),
+    "network-recent": (_('recently active'), _('last 7 days')),
+    "network-frequent": (_('used daily'), _('at least 3 times a day')),
+    "network-blocked-excluded": (_('excluded by blocking'), _('Pi-hole would block them')),
+    "static-manual": (_('Added manually'), "lists/static-manual.txt"),
+    "exclude": (_('Excluded manually'), "lists/exclude.txt"),
+    "merged-final": (_('Total preloaded'), _('domains queried by preload')),
+}
+
+# ---------- Data ----------
+def sh(*cmd, timeout=15):
+    try: return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception: return ""
+
+def ustats():
+    out = sh("sudo", "-n", "unbound-control", "stats_noreset")
+    try: return {k: float(v) for k, v in (l.split("=", 1) for l in out.splitlines() if "=" in l)}
+    except Exception: return {}
+
+def pihole_today():
+    """Queries, blocked queries and clients since midnight. None means unreadable, never healthy."""
+    try:
+        t0 = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+        con = sqlite3.connect(f"file:{FTL_DB}?mode=ro", uri=True, timeout=5)
+        q, b, c = con.execute(f"SELECT COUNT(*), SUM(status IN {BLOCKED}), COUNT(DISTINCT client) FROM query_storage WHERE timestamp >= ?", (int(t0),)).fetchone()
+        # Exclude SYSTEM_CLIENTS: preload and infrastructure traffic would skew device rates.
+        # Response time matters: Pi-hole statuses 3/17 are cached; status 2 goes to unbound.
+        # Under 5 ms counts as instant; over 50 ms indicates an upstream query.
+        EXCL = "client NOT IN (SELECT id FROM client_by_id WHERE ip IN (%s))" % ",".join("'%s'" % c for c in SYSTEM_CLIENTS)
+        answered, instant, internet, p50 = con.execute(f"""SELECT COUNT(*), SUM(reply_time < 0.005), SUM(reply_time > 0.05),
+                (SELECT reply_time FROM query_storage WHERE timestamp >= ? AND status IN (2,3,17) AND {EXCL} ORDER BY reply_time LIMIT 1 OFFSET (SELECT COUNT(*)/2 FROM query_storage WHERE timestamp >= ? AND status IN (2,3,17) AND {EXCL}))
+                FROM query_storage WHERE timestamp >= ? AND status IN (2,3,17) AND {EXCL}""", (int(t0), int(t0), int(t0))).fetchone()
+        slow = internet or 0
+        top = con.execute(f"SELECT d.domain, COUNT(*) n FROM query_storage q JOIN domain_by_id d ON d.id=q.domain WHERE q.timestamp >= ? AND q.status IN {BLOCKED} GROUP BY d.domain ORDER BY n DESC LIMIT 3", (int(t0),)).fetchall()
+        con.close()
+        g = sqlite3.connect(f"file:{GRAVITY_DB}?mode=ro", uri=True, timeout=5)
+        gn = g.execute("SELECT COUNT(*) FROM gravity").fetchone()[0]
+        gu = g.execute("SELECT value FROM info WHERE property='updated'").fetchone()
+        g.close()
+        return {"queries": q or 0, "blocked": b or 0, "clients": c or 0, "top_blocked": top, "gravity": gn, "gravity_updated": int(gu[0]) if gu else None,
+                "cached": instant or 0, "answered": answered or 0, "p50_ms": (p50 or 0) * 1000, "slow": slow or 0}
+    except Exception as e:
+        return None
+
+def timers():
+    """systemd timers as (label, next-run epoch) pairs. Empty means unknown."""
+    names = {"dnspreload-update": _('Update lists'), "dnspreload-slice": _('Slice preload (hourly)'), "dnspreload-full": _('Full preload (fallback)'), "dnspreload-network": _('Network preload'),
+             "dnspreload-report": _('Weekly report'), "unbound-cache-dump": _('Save cache'), "dnspreload-metrics": _('Metrics')}
+    out = sh("systemctl", "list-timers", "--no-pager", "-o", "json", "dnspreload*", "unbound-cache*")
+    res = []
+    try:
+        for t in json.loads(out):
+            u = t["unit"].replace(".timer", "")
+            if u in names and t.get("next"): res.append((names[u], t["next"] / 1e6 if t["next"] > 1e12 else t["next"]))
+    except Exception: pass
+    return sorted(res, key=lambda x: x[1])
+
+def failed_units():
+    """Return stopped or failed services; None means systemd has no service data."""
+    known = sh("systemctl", "list-units", "--all", "--no-legend", "--plain", "dnspreload-panel.service", "unbound.service", "pihole-FTL.service")
+    if not known.strip(): return None
+    bad = [l.split()[0] for l in sh("systemctl", "--failed", "--no-legend", "--plain", "dnspreload*", "unbound*", "pihole-FTL*").splitlines() if l.strip()]
+    for u in ("unbound.service", "pihole-FTL.service", "dnspreload-update.timer", "dnspreload-slice.timer", "dnspreload-network.timer", "unbound-cache-dump.timer", "nftables.service"):
+        st = sh("systemctl", "is-active", u).strip()
+        if st != "active" and u not in bad: bad.append(f"{u} ({st or _('unknown')})")
+    return bad
+
+def list_counts():
+    res = {}
+    for p in sorted(LISTS.glob("*.txt")):
+        n = sum(1 for l in p.open() if l.strip() and not l.startswith("#"))
+        res[p.stem] = {"n": n, "mtime": p.stat().st_mtime}
+    return res
+
+def MODE_LABEL(lr):
+    m = lr.get("mode")
+    if m == "slice":
+        return _('Slice {slot} of {slices}').format(slot=lr['slot'], slices=lr['slices']) if lr.get("slot") else _('one hourly slice')
+    return _('all domains') if m == "full" else _('network domains only')
+
+_cache = {"t": 0, "d": None}
+def snapshot():
+    if time.time() - _cache["t"] < 10 and _cache["d"]: return _cache["d"]
+    s = ustats(); q = s.get("total.num.queries", 0); h = s.get("total.num.cachehits", 0)
+    lr = json.loads((STATE / "last-run.json").read_text()) if (STATE / "last-run.json").exists() else {}
+    hist = []
+    if (STATE / "history.csv").exists():
+        hist = [r.split(",") for r in (STATE / "history.csv").read_text().splitlines()[1:][-8:]]
+    paused = 0
+    if (STATE / "servfail-paused.json").exists():
+        paused = sum(1 for v in json.loads((STATE / "servfail-paused.json").read_text()).values() if v > time.time())
+    reports = sorted(STATE.glob("report-*.md"))
+    dg = sh("dig", "+time=2", "+tries=1", "+noall", "+answer", "+stats", "@127.0.0.1", "heise.de", "A")
+    dig_ok = " IN\tA\t" in dg or "\tA\t" in dg
+    import re as _re; m = _re.search(r"Query time: (\d+)", dg); dig_ms = int(m.group(1)) if m else -1
+    d = {"time": time.time(), "unbound_up": bool(s), "dig_ok": dig_ok, "dig_ms": dig_ms, "ftl_active": sh("systemctl", "is-active", "pihole-FTL").strip() == "active",
+         "cache": int(s.get("msg.cache.count", 0)), "rrset": int(s.get("rrset.cache.count", 0)),
+         "hit_rate": (h / q * 100) if q else None, "queries": int(q), "hits": int(h),
+         "prefetch": int(s.get("total.num.prefetch", 0)), "expired": int(s.get("total.num.expired", 0)),
+         "servfail": int(s.get("num.answer.rcode.SERVFAIL", 0)), "recursion_avg_ms": s.get("total.recursion.time.avg", 0) * 1000,
+         "uptime_h": s.get("time.up", 0) / 3600, "last_run": lr, "history": hist, "lists": list_counts(), "paused": paused,
+         "report": reports[-1].name if reports else None, "pihole": pihole_today(), "timers": timers(), "failed": failed_units()}
+    _cache.update(t=time.time(), d=d); return d
+
+def metrics():
+    d = snapshot(); ts = int(time.time() * 1e9); ph = d["pihole"] or {}
+    L = [f"dnspreload,host=pihole cache={d['cache']}i,rrset={d['rrset']}i,hit_rate={d['hit_rate'] or 0:.2f},queries={d['queries']}i,hits={d['hits']}i,prefetch={d['prefetch']}i,expired={d['expired']}i,servfail={d['servfail']}i,recursion_avg_ms={d['recursion_avg_ms']:.2f},paused={d['paused']}i,failed_units={len(d['failed'] or [])}i {ts}"]
+    if ph: L.append(f"pihole_today,host=pihole queries={ph['queries']}i,blocked={ph['blocked']}i,clients={ph['clients']}i,gravity={ph['gravity']}i,cached={ph['cached']}i,answered={ph['answered']}i,p50_ms={ph['p50_ms']:.2f},slow={ph['slow']}i {ts}")
+    for k, v in d["lists"].items(): L.append(f"dnspreload_list,host=pihole,list={k} n={v['n']}i,age_h={(time.time()-v['mtime'])/3600:.1f} {ts}")
+    lr = d["last_run"]
+    if lr: L.append(f"dnspreload_run,host=pihole,mode={lr.get('mode','?')} domains={lr.get('domains',0)}i,duration_s={lr.get('duration_s',0)},cache_before={int(float(lr.get('cache_before') or 0))}i,cache_after={int(float(lr.get('cache_after') or 0))}i {ts}")
+    tmp = STATE / "metrics.txt.tmp"; tmp.write_text("\n".join(L) + "\n"); os.replace(tmp, STATE / "metrics.txt"); print("\n".join(L))
+
+# ---------- Rendering ----------
+def n(x):  # 48041 -> 48.041; accepts "20.1" and None.
+    try: return f"{int(float(x)):,}".replace(",", ".")
+    except (TypeError, ValueError): return _('no data')
+def pct(x, digits=1):
+    return _('no data') if x is None else f"{x:.{digits}f}".replace(".", ",") + " %"
+def ago(ts):
+    if not ts: return _('never')
+    s = time.time() - ts
+    if s < 90: return _('just now')
+    if s < 5400: return _('{n} min ago').format(n=int(s/60))
+    if s < 172800: return _('{n} h ago').format(n=int(s/3600))
+    return _('{n} days ago ({date})').format(n=int(s/86400), date=time.strftime('%d.%m.%y', time.localtime(ts)))
+def until(ts):
+    s = ts - time.time(); clock = time.strftime("%H:%M", time.localtime(ts))
+    if s < 0: return _('overdue')
+    if s < 3600: return f"in {int(s/60)} min ({clock})"
+    if s < 86400: return f"in {s/3600:.0f} h ({clock})"
+    return dmy(ts)
+def dmy(ts):  # epoch -> 25.09.26 21:18
+    return time.strftime("%d.%m.%y %H:%M", time.localtime(ts))
+def parse_ts(t):
+    for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try: return time.mktime(time.strptime(t, f))
+        except (ValueError, TypeError): pass
+    return None
+def dur(s):
+    try: s = int(float(s or 0))
+    except (TypeError, ValueError): return _('no data')
+    return f"{s} s" if s < 90 else f"{s//60} min"
+
+CSS = """*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0;background:#0b0f14;color:#e8edf2}
+header{padding:14px 16px;background:#121820;border-bottom:1px solid #22303f;display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+h1{font-size:17px;margin:0;white-space:nowrap}header span{color:#8494a7;font-size:12px;white-space:nowrap}
+main{padding:12px;max-width:720px;margin:0 auto;display:grid;gap:14px}
+@media(min-width:760px){main{max-width:1100px;grid-template-columns:1fr 1fr}}
+section{background:#121820;border:1px solid #22303f;border-radius:12px;overflow:hidden}
+section>h2{margin:0;padding:10px 14px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#aab8c8;background:#182130;border-left:4px solid #3b7ddd}
+section.g>h2{border-left-color:#3fbf7f}section.y>h2{border-left-color:#e8b94a}section.r>h2{border-left-color:#e85d5d}section.u>h2{border-left-color:#5b8def}
+.row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:9px 14px;border-top:1px solid #1b2531}
+.row:first-of-type{border-top:0}.row .l{color:#c3cdd8;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .l small{display:block;color:#71829a;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+button{flex:1;padding:12px;font-size:15px;border:0;border-radius:8px;background:#2b6cb0;color:#fff;font-weight:600}button[value=off]{background:#c53030}
+.row .v{white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:600;flex-shrink:0}
+.big .v{font-size:22px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-left:8px;vertical-align:1px;background:#5b8def}
+.dot.g{background:#3fbf7f}.dot.y{background:#e8b94a}.dot.r{background:#e85d5d}
+.next{padding:9px 14px;font-size:13px;line-height:1.35;color:#8fa1b5;background:#0f151c;border-top:1px solid #1b2531}
+.next.act{color:#e8b94a}footer{color:#4f5f72;font-size:12px;padding:16px;text-align:center}footer a{color:#7ab8ff;text-decoration:none}"""
+
+def row(label, value, cls=None, sub=None, big=False):
+    dot = f'<i class="dot {cls}"></i>' if cls else ""
+    subh = f"<small>{html.escape(sub)}</small>" if sub else ""
+    return f'<div class="row{" big" if big else ""}"><div class=l>{html.escape(label)}{subh}</div><div class=v>{html.escape(str(value))}{dot}</div></div>'
+def section(title, cls, rows, nxt, act=False):
+    return f'<section class="{cls}"><h2>{html.escape(title)}</h2>{"".join(rows)}<div class="next{" act" if act else ""}">{html.escape(nxt or "")}</div></section>'
+def worst(*c):
+    for k in ("r", "y", "u", "g"):
+        if k in c: return k
+    return "g"
+
+def page(d):
+    S = []; ph = d["pihole"]; lr = d["last_run"]; L = d["lists"]
+    # 1 Status
+    c_dns = "g" if d["unbound_up"] and d["ftl_active"] and d["dig_ok"] else "r"
+    c_fail = "u" if d["failed"] is None else "r" if d["failed"] else "g"
+    fresh = (time.time() - L["merged-final"]["mtime"] < 30 * 3600) if "merged-final" in L else None
+    c_fresh = "u" if fresh is None else "g" if fresh else "y"
+    rows = [row(_('DNS answers queries'), _('yes') if c_dns == "g" else _('NO'), c_dns, _('Test query through Pi-hole in {ms} ms').format(ms=d['dig_ms']) if c_dns == "g" else _('Test query through Pi-hole failed') if not d["dig_ok"] else _('unbound or Pi-hole stopped'), big=True),
+            row(_('Failures'), _('unknown') if d["failed"] is None else _('none') if not d["failed"] else ", ".join(d["failed"]), c_fail, _('systemd services in this stack')),
+            row(_('Preload list up to date'), _('yes') if fresh else _('unknown') if fresh is None else _('no'), c_fresh, _('As of {date}').format(date=dmy(L['merged-final']['mtime'])) if fresh is not None else _('List missing'))]
+    st = worst(c_dns, c_fail, c_fresh)
+    S.append(section("Status", st, rows, _('No action needed.') if st == "g" else _('Check journalctl -u <service> on the DNS server.'), st != "g"))
+    # 2 Today: user view from Pi-hole.
+    if ph:
+        bp = (ph["blocked"] / ph["queries"] * 100) if ph["queries"] else 0
+        rows = [row(_('Queries today'), n(ph["queries"]), None, _('from {n} devices').format(n=n(ph['clients'])), big=True),
+                row(_('blocked queries'), f"{n(ph['blocked'])} · {pct(bp, 0)}", "g", _('Ads, trackers, malware'))]
+        for dom, cnt in ph["top_blocked"]: rows.append(row(dom, n(cnt), None, _('most blocked domain') if dom == ph["top_blocked"][0][0] else None))
+        gu = ph["gravity_updated"]; c_g = "r" if ph["gravity"] < 100000 else "g" if gu and time.time() - gu < 8 * 86400 else "y"
+        rows.append(row(_('Blocklist'), _('{n} domains').format(n=n(ph['gravity'])), c_g, _('updated {ago}').format(ago=ago(gu))))
+        S.append(section(_('Today'), worst(c_g), rows, _('No action needed.') if c_g == "g" else (_('Blocklist almost empty — run pihole -g.') if ph["gravity"] < 100000 else _('Blocklist older than 8 days — run pihole -g.')), c_g != "g"))
+    else:
+        S.append(section(_('Today'), "u", [row(_('Pi-hole data'), _('unreadable'), "u", _('No read access to pihole-FTL.db'))], _('Status incomplete — check the data source.'), True))
+    # 3 Device response times, excluding preload, followed by unbound internals.
+    rows = []; c_hr = "u"
+    if ph and ph["answered"]:
+        hr = ph["cached"] / ph["answered"] * 100; c_hr = "g" if hr >= 90 else "y" if hr >= 70 else "r"
+        rows.append(row(_('Answered instantly'), pct(hr), c_hr, _('under 5 ms · {n} device queries today (excluding server, gateway, preload)').format(n=n(ph['answered'])), big=True))
+        ir = ph["slow"] / ph["answered"] * 100
+        rows.append(row(_('Queried upstream'), f"{pct(ir)} ({n(ph['slow'])})", "g" if ir < 3 else "y", _('over 50 ms · cache empty or expired')))
+        rows.append(row(_('Typical response time'), f"{ph['p50_ms']:.0f} ms" if ph['p50_ms'] >= 1 else _('under 1 ms'), "g" if ph["p50_ms"] < 20 else "y", _("Today's median for devices")))
+    elif ph: rows.append(row(_('No device queries yet today'), "–", "u"))
+    else: rows.append(row(_('Device queries'), _('unreadable'), "u", _('Pi-hole data missing')))
+    if d["unbound_up"]:
+        rows += [row(_('Cache entries'), n(d["cache"]), "g" if d["cache"] > 20000 else "y", _('unbound, including preloaded entries')),
+                 row(_('Refreshed in background'), n(d["prefetch"]), None, _('Prefetch before entries expire')),
+                 row(_('Expired entries served instantly'), n(d["expired"]), None, _('then refreshed in background')),
+                 row(_('Upstream queries'), f"{d['recursion_avg_ms']:.0f} ms", "g" if d["recursion_avg_ms"] < 300 else "y", _('Average for cache misses')),
+                 row(_('unbound uptime'), f"{d['uptime_h']:.0f} h" if d["uptime_h"] >= 2 else f"{d['uptime_h']*60:.0f} min", "g", _('{n} queries including preload, SERVFAIL {fail}').format(n=n(d['queries']), fail=n(d['servfail'])))]
+    else: rows.append(row("unbound", _('not responding'), "r", _('No readable statistics')))
+    c3 = worst(c_hr if c_hr != "u" else "g", "y" if d["cache"] <= 20000 else "g", "r" if not d["unbound_up"] else "g")
+    S.append(section(_('Response speed'), c3, rows, _('No action needed.') if c3 == "g" else _('Check unbound.') if not d["unbound_up"] else _('Small cache or low hit rate — the next full preload will refill it.'), c3 != "g"))
+    # 4 Last preload
+    if lr:
+        comp = (lr.get("completed") or "").split("(")[-1].rstrip(")").replace("%", "").strip()
+        try: cf = float(comp)
+        except ValueError: cf = None
+        c_c = "u" if cf is None else "g" if cf >= 98 else "y"
+        t = lr.get("time", ""); tsr = parse_ts(t)
+        c_w = "u" if tsr is None else "g" if time.time() - tsr < (3 * 3600 if lr.get("mode") == "slice" else 30 * 3600) else "y"
+        rows = [row(_('When'), ago(tsr) if tsr else _('unknown'), c_w, dmy(tsr) if tsr else _('Unreadable time: {t}').format(t=t), big=True),
+                row(_('What'), MODE_LABEL(lr), None, _('{n} domains in {duration}').format(n=n(lr.get('domains', 0)), duration=dur(lr.get('duration_s')))),
+                row(_('Answered'), pct(cf), c_c, _('The rest are dead domains')),
+                row(_('Cache after preload'), f"{n(lr.get('cache_before') or 0)} → {n(lr.get('cache_after') or 0)}", None, _('Entries before → after')),
+                row(_('Paused after errors'), n(d["paused"]), "g" if d["paused"] < 500 else "y", _('Automatically retried after 7 days'))]
+        S.append(section(_('Last preload'), worst(c_c, c_w), rows, _('No action needed.') if c_c == "g" else _('Under 98 % answered — check logs/ and last-run.json.'), c_c != "g"))
+        hrows = []
+        for r in reversed(d["history"][-6:]):
+            if len(r) >= 9:
+                hp = parse_ts(r[0]); hts = dmy(hp) if hp else r[0]
+                hrows.append(row(hts, f"{n(r[2])} in {dur(r[4])}", None, MODE_LABEL({"mode": r[1]})))
+        if hrows: S.append(section(_('History'), "g", hrows, _('Domains and duration per run; details in state/history.csv.')))
+    else:
+        S.append(section(_('Last preload'), "u", [row(_('No runs yet'), "–", "u")], _('First run: dnspreload preload slice (hourly timer).'), True))
+    # 5 Next runs
+    rows = [row(name, until(ts), "y" if ts < time.time() else None) for name, ts in d["timers"]]
+    late = any(ts < time.time() for _, ts in d["timers"])
+    S.append(section(_('Next runs'), "u" if not rows else "y" if late else "g", rows or [row("Timer", _('unreadable'), "u")], _('Automatic systemd timers.') if rows and not late else _('A timer is overdue — check systemctl list-timers.') if late else _('Check systemctl list-timers.'), not rows or late))
+    # 6 Lists
+    rows = []
+    for k, (label, sub) in LIST_NAMES.items():
+        if k in L:
+            cnt = L[k]["n"]; age = time.time() - L[k]["mtime"]
+            cls = None if k in ("static-manual", "exclude", "network-blocked-excluded") else "g" if age < 30 * 3600 else "y"
+            rows.append(row(label, n(cnt), cls, sub, big=(k == "merged-final")))
+    c6 = "y" if any("y" in (r or "") for r in rows) else "g"
+    S.append(section(_('Lists'), c6, rows, _('Rebuilt daily at 03:50.') if c6 == "g" else _('A list is older than 30 h — check the list update.'), c6 != "g"))
+    # Timed Pi-hole group switches: dnspreload-switch list returns configuration and state.
+    for sw in switches():
+        on, end_s, name = sw["on"], sw.get("until") or 0, sw["name"]
+        partial = sw.get("kind") == "partial"
+        val = _('off · {n} min left').format(n=max(0, int((end_s - time.time()) // 60))) if on else _('on')
+        r0 = row(_('State'), val, "y" if on else "g", _('back on at {clock}').format(clock=time.strftime('%H:%M', time.localtime(end_s))) if on else sw["scope"], big=True)
+        if on: r0 = r0.replace("<div class=v>", f"<div class=v id=rest-{name} data-end={int(end_s)}>", 1)
+        btns = f"<button name=a value=off>{_('turn back on')}</button>" if on else "".join(f"<button name=a value=on{m}>{_('off for {m} min').format(m=m)}</button>" if m < 60 else f"<button name=a value=on{m}>{_('off for {n} h').format(n=m//60)}</button>" for m in sw["presets"])
+        rows = [r0, f"<div class=row><form method=post action=/switch/{name} style='display:flex;gap:8px;width:100%'>{btns}</form></div>"]
+        if on: rows.append(f"<script>(function(){{var e=document.getElementById('rest-{name}');if(!e)return;var t=+e.dataset.end,d=e.querySelector('i');function f(){{var s=t-Date.now()/1000;if(s<=0){{location.reload();return}}e.textContent='{_('off · ')}'+Math.floor(s/60)+':'+('0'+Math.floor(s%60)).slice(-2)+' min';if(d)e.appendChild(d)}}f();setInterval(f,1000)}})()</script>")
+        S.append(section(("◐ " if partial else "● ") + sw["label"], "y" if on else "g", rows, (_('Partial: Google Ads domains only') if partial else _('Full: all blocklists')) + (_(' — turns back on automatically.') if on else "."), on))
+    S.append(section(_('Blocking suggestions'), "g", [f"<div class=row><a href=/blocking style='display:block;width:100%;text-align:center;padding:12px;border:1px solid #30363d;border-radius:8px;color:#e6edf3;text-decoration:none'>{_('View suggestions')}</a></div>"], _('When you have time: domains that may be overblocked or underblocked.')))
+    body = "".join(S)
+    return (f"<!doctype html><html lang={UI_LANG}><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+            f"<title>DNSpreload</title><style>{CSS}</style></head><body><header><h1><img src=/logo.svg alt='' style='height:26px;vertical-align:-6px;margin-right:8px'>{html.escape(PANEL_TITLE)}</h1><span>{dmy(d['time'])}</span></header>"
+            f"<main>{body}</main><footer>{_('Admin and server VLAN')} · <a href='/json'>{_('Raw data')}</a> · <a href='/metrics'>{_('Metrics')}</a>"
+            f"{' · <a href=/report>' + _('Weekly report') + '</a>' if d['report'] else ''}</footer></body></html>")
+
+def switches():
+    try: return json.loads(sh("sudo", "-n", "/usr/local/bin/dnspreload-switch", "list") or "[]")
+    except ValueError: return []
+def switch_set(name, action, minutes=None):
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", name): return False
+    args = ["off"] if action == "off" else ["on", str(int(minutes))] if action == "on" and minutes else None
+    if not args: return False
+    try: return subprocess.run(["sudo", "-n", "/usr/local/bin/dnspreload-switch", name, *args], capture_output=True, timeout=15).returncode == 0
+    except Exception: return False
+TOKEN_SEEN = STATE / "token-seen.json"       # id -> last access epoch, separate from token configuration.
+_seen_cache = {"t": 0, "d": {}}
+def touch_token(tid):
+    now = time.time()
+    if now - _seen_cache["d"].get(tid, 0) < 60: return          # Write at most once per minute.
+    try: d = json.loads(TOKEN_SEEN.read_text()) if TOKEN_SEEN.exists() else {}
+    except (OSError, ValueError): d = {}
+    d[tid] = int(now); _seen_cache["d"] = d
+    try: tmp = TOKEN_SEEN.with_suffix(".tmp"); tmp.write_text(json.dumps(d)); os.replace(tmp, TOKEN_SEEN)
+    except OSError: pass
+def role_of(token):
+    """Resolve a token to (role, label) or None and record its last access."""
+    if not token or not TOKENS.exists(): return None
+    h = hashlib.sha256(token.encode()).hexdigest()
+    try:
+        for k, v in json.load(TOKENS.open()).items():
+            if v.get("hash") == h: touch_token(k); return v["role"], v["label"]
+    except (ValueError, OSError): pass
+    return None
+def token_list():
+    try: d = json.load(TOKENS.open())
+    except (ValueError, OSError): d = {}
+    try: seen = json.loads(TOKEN_SEEN.read_text()) if TOKEN_SEEN.exists() else {}
+    except (OSError, ValueError): seen = {}
+    return [{"id": k, "role": v["role"], "label": v["label"], "token": v.get("token"), "created": v.get("created"), "last_seen": seen.get(k)} for k, v in d.items()]
+def token_add(role, label):
+    if role not in ("admin", "family") or not re.fullmatch(r"[\w .:@/()+-]{1,40}", label): return None
+    try: out = sh("sudo", "-n", "/usr/local/bin/dnspreload-token", "add", role, label)
+    except Exception: return None
+    m = re.search(r"TOKEN \(einmalig\): (\S+)", out or ""); return m.group(1) if m else None
+def token_revoke(tid):
+    if not re.fullmatch(r"\d{1,6}", tid): return False
+    try: return "entfernt" in (sh("sudo", "-n", "/usr/local/bin/dnspreload-token", "revoke", tid) or "")
+    except Exception: return False
+
+def family_page(sw_list, label):
+    """A simple user page with switches and remaining time."""
+    S = []
+    for sw in sw_list:
+        on, end_s, name = sw["on"], sw.get("until") or 0, sw["name"]
+        val = _('off · {n} min left').format(n=max(0, int((end_s - time.time()) // 60))) if on else _('on')
+        r0 = row(_('State'), val, "y" if on else "g", _('back on at {clock}').format(clock=time.strftime('%H:%M', time.localtime(end_s))) if on else _('for your devices'), big=True)
+        if on: r0 = r0.replace("<div class=v>", f"<div class=v id=rest-{name} data-end={int(end_s)}>", 1)
+        btns = f"<button name=a value=off>{_('turn back on')}</button>" if on else "".join(f"<button name=a value=on{m}>{_('off for {m} min').format(m=m)}</button>" if m < 60 else f"<button name=a value=on{m}>{_('off for {n} h').format(n=m//60)}</button>" for m in sw["presets"])
+        rows = [r0, f"<div class=row><form method=post action=/u/switch/{name} style='display:flex;flex-direction:column;gap:8px;width:100%'>{btns}</form></div>"]
+        if on: rows.append(f"<script>(function(){{var e=document.getElementById('rest-{name}');if(!e)return;var t=+e.dataset.end,d=e.querySelector('i');function f(){{var s=t-Date.now()/1000;if(s<=0){{location.reload();return}}e.textContent='{_('off · ')}'+Math.floor(s/60)+':'+('0'+Math.floor(s%60)).slice(-2)+' min';if(d)e.appendChild(d)}}f();setInterval(f,1000)}})()</script>")
+        S.append(section(sw["label"], "y" if on else "g", rows, _('Turns back on automatically.') if on else None, on))
+    if not S: S.append(section(_('No switch'), "u", [row(_('For this account'), _('no switches available'), "u")], _('Ask your admin.')))
+    return (f"<!doctype html><html lang={UI_LANG}><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+            f"<title>{_('Ad blocker')}</title><style>{CSS}</style></head><body><header><h1><img src=/logo.svg alt='' style='height:26px;vertical-align:-6px;margin-right:8px'>{_('Ad blocker')}</h1><span>{html.escape(label)}</span></header>"
+            f"<main>{''.join(S)}</main><footer>{_('Bookmark this page.')}</footer></body></html>")
+
+def reviewed_blocking():
+    """Combine candidates with nightly reviews; display only reviewed 'keep' verdicts.
+    Unreviewed candidates wait; dropped candidates stay hidden. Raw data remains at /api/v1/blocking/raw."""
+    try: d = json.loads((STATE / "blockmon.json").read_text())
+    except (OSError, ValueError): d = {}
+    try: rv = json.loads((STATE / "blockmon-review.json").read_text()).get("reviews", {})
+    except (OSError, ValueError): rv = {}
+    out = {"time": d.get("time"), "reviewed_at": None, "over": [], "under": [], "pending": 0, "dropped": 0}
+    try: out["reviewed_at"] = (STATE / "blockmon-review.json").stat().st_mtime
+    except OSError: pass
+    for kind in ("over", "under"):
+        for x in d.get(kind, []):
+            r = rv.get(x["domain"])
+            if not r or r.get("kind") != kind: out["pending"] += 1; continue
+            if r.get("verdict") == "drop": out["dropped"] += 1; continue
+            out[kind].append({**x, "review": {k: r.get(k) for k in ("purpose", "category", "if_blocked", "recommendation", "confidence", "reason", "model", "revisions", "ts")}})
+    return out
+
+def blocking_page():
+    """Blocking-monitor suggestions with domain actions; no alerts or main-panel counter."""
+    d = reviewed_blocking()
+    dec = {}
+    try: dec = json.loads((STATE / "blockmon-decisions.json").read_text())
+    except (OSError, ValueError): pass
+    def card(x):
+        rv = x.get("review") or {}
+        rec = {"allow": _('Recommendation: allow'), "deny": _('Recommendation: block'), "keep": _('Recommendation: keep as is')}.get(rv.get("recommendation"), "")
+        why = (f"<li><b>{html.escape(rv.get('purpose') or '')}</b> <i>({html.escape(rv.get('category') or '')})</i></li><li>{_('If blocked: ')}{html.escape(rv.get('if_blocked') or '')}</li><li>{rec} — {html.escape(rv.get('reason') or '')}</li>" if rv else "")
+        why += "".join(f"<li class=obs>{html.escape(w)}</li>" for w in x["why"])
+        meta = _('{devices} devices · {queries} queries').format(devices=x.get('clients', 0), queries=x.get('queries', 0)) + (_(' · Lists {lists}').format(lists=x['lists']) if x.get("lists") else "")
+        b = (("allow", _('Allow'), "ok"), ("dismiss", _('Dismiss'), ""), ("later", _('Later'), "")) if x["kind"] == "over" else (("deny", _('Block'), "warn"), ("dismiss", _('Dismiss'), ""), ("later", _('Later'), ""))
+        btns = "".join(f"<button name=d value={v} class='{c}'>{t}</button>" for v, t, c in b)
+        return (f"<div class=cand><div class=dom><b>{html.escape(x['domain'])}</b><span>{meta}{_(' · Score {score}').format(score=x['score'])}</span></div><ul>{why}</ul>"
+                f"<form method=post action=/blocking><input type=hidden name=domain value='{html.escape(x['domain'])}'>{btns}</form></div>")
+    over, under = d.get("over", []), d.get("under", [])
+    ts = time.strftime("%d.%m. %H:%M", time.localtime(d["time"])) if d.get("time") else _('not yet')
+    rts = (time.strftime("%d.%m. %H:%M", time.localtime(d["reviewed_at"])) if d.get("reviewed_at") else _('not yet')) + _(' · {pending} awaiting review · {dropped} dropped').format(pending=d.get('pending', 0), dropped=d.get('dropped', 0))
+    recent = sorted(dec.items(), key=lambda kv: -kv[1].get("ts", 0))[:15]
+    hist = "".join(f"<li>{time.strftime('%d.%m.', time.localtime(v.get('ts', 0)))} <b>{html.escape(k)}</b> → {dict(allow=_('allowed'), deny=_('blocked'), dismiss=_('dismissed'), later=_('later')).get(v['decision'], v['decision'])}</li>" for k, v in recent) or f"<li>{_('none yet')}</li>"
+    css = CSS + ".cand{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:12px;margin:8px 0}.cand .dom{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px}.cand .dom span{color:#8b949e;font-size:13px}.cand ul{margin:8px 0;padding-left:18px;color:#c9d1d9;font-size:14px}.cand form{display:flex;gap:8px}.cand button{flex:1;padding:10px;border-radius:8px;border:1px solid #30363d;background:#21262d;color:#e6edf3;font-size:15px}.cand button.ok{background:#1f6f3f}.cand button.warn{background:#7a2e2e}.cand button{white-space:nowrap;padding:10px 4px;font-size:14px}.cand li.obs{color:#8b949e}.empty{color:#8b949e;padding:12px}"
+    return (f"<!doctype html><html lang={UI_LANG}><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>{_('Blocking suggestions')}</title><style>{css}</style></head>"
+            f"<body><header><h1><img src=/logo.svg alt='' style='height:26px;vertical-align:-6px;margin-right:8px'>{_('Blocking suggestions')}</h1><span>{_('Candidates {ts} · Review {rts} · ').format(ts=ts, rts=rts)}<a href=/ style='color:#58a6ff'>{_('back')}</a></span></header><main>"
+            f"<section><h2>{_('Likely overblocked ({n})').format(n=len(over))}</h2><p class=empty>{_('Domains that worked before the last list update, are retried in bursts by apps, or belong to the site you are visiting. “Allow” adds them to the Pi-hole allowlist.')}</p>{''.join(card(x) for x in over) or '<p class=empty>' + _('none — all good.') + '</p>'}</section>"
+            f"<section><h2>{_('Likely underblocked ({n})').format(n=len(under))}</h2><p class=empty>{_('Allowed queries listed in Hagezi ULTIMATE or with tracking patterns in their names. “Block” adds them to the Pi-hole denylist.')}</p>{''.join(card(x) for x in under) or '<p class=empty>' + _('none.') + '</p>'}</section>"
+            f"<section><h2>{_('Recent decisions')}</h2><ul style='padding-left:18px;font-size:14px'>{hist}</ul></section>"
+            f"</main><footer>{_('Calculated every 6 h without AI. Dismiss pauses for 90 days; Later for 14 days.')}</footer></body></html>")
+
+class H(BaseHTTPRequestHandler):
+    def auth(self):
+        """Return (role, label) from admin networks or header/cookie tokens; None denies access."""
+        ip = self.client_address[0]
+        tok = None
+        a = self.headers.get("Authorization", "")
+        if a.startswith("Bearer "): tok = a[7:].strip()
+        if not tok:
+            c = http.cookies.SimpleCookie(self.headers.get("Cookie", "")); tok = c["dnsp"].value if "dnsp" in c else None
+        if tok: return role_of(tok)            # A supplied token alone determines the role; invalid tokens deny access.
+        # Token-free admin access is browser-only; the API always requires a token.
+        if not self.path.startswith("/api/") and ip.startswith(ADMIN_NETS): return ("admin", ip)
+        return None
+    def out(self, code, body, ct="text/html; charset=utf-8", extra=()):
+        b = body.encode() if isinstance(body, str) else body
+        self.send_response(code); self.send_header("Content-Type", ct); self.send_header("Content-Length", str(len(b))); self.send_header("Cache-Control", "no-store")
+        for k, v in extra: self.send_header(k, v)
+        self.end_headers(); self.wfile.write(b)
+    def js(self, code, obj): self.out(code, json.dumps(obj, default=str), "application/json")
+    def visible(self, role): return [sw for sw in switches() if role in sw.get("roles", ["admin"])]
+
+    def log_message(self, *a): pass
+    def do_GET(self):
+        try:
+            m = re.fullmatch(r"/u/([A-Za-z0-9]{16,64})", self.path)
+            if m:  # Store the entry-link token as a cookie, then remove it from the URL.
+                if not role_of(m.group(1)): self.out(403, _('Invalid link.')); return
+                self.out(303, "", extra=(("Location", "/u"), ("Set-Cookie", f"dnsp={m.group(1)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax"))); return
+            who = self.auth()
+            if not who: self.js(401, {"error": _('access denied')}) if self.path.startswith("/api/") else self.out(401, _('Access denied. Use the link from your admin.')); return
+            role, label = who
+            if self.path == "/u": self.out(200, family_page(self.visible(role), label)); return
+            if self.path == "/api/v1/switches": self.js(200, {"role": role, "switches": self.visible(role)}); return
+            if role != "admin": self.out(403, _('Admins only.')); return
+            if self.path == "/api/v1/status":
+                d = snapshot(); self.js(200, {k: d[k] for k in ("time", "unbound_up", "dig_ok", "dig_ms", "ftl_active", "cache", "rrset", "failed", "timers", "uptime_h")}); return
+            if self.path == "/api/v1/stats":
+                d = snapshot(); self.js(200, {"pihole": d["pihole"], "unbound": {k: d[k] for k in ("queries", "hits", "prefetch", "expired", "servfail", "recursion_avg_ms")}, "lists": d["lists"], "last_run": d["last_run"], "history": d["history"]}); return
+            if self.path == "/json": self.js(200, snapshot()); return
+            if self.path == "/metrics":
+                p = STATE / "metrics.txt"; self.out(200, p.read_text() if p.exists() else "", "text/plain"); return
+            if self.path == "/": self.out(200, page(snapshot())); return
+            if self.path == "/blocking": self.out(200, blocking_page()); return
+            if self.path == "/api/v1/daystats":
+                p = STATE / "daystats.json"; self.out(200, p.read_text() if p.exists() else "{}", "application/json"); return
+            if self.path in ("/logo.svg", "/favicon.ico"):
+                lp = Path("/opt/dnspreload-v2/brand/dnspreload-logo.svg")
+                if lp.exists(): self.out(200, lp.read_text(), "image/svg+xml"); return
+                self.out(404, "", "text/plain"); return
+            if self.path == "/api/v1/tokens":
+                if role != "admin": self.js(403, {"error": _('admin only')}); return
+                self.js(200, {"tokens": token_list()}); return
+            if self.path == "/api/v1/blocking": self.js(200, reviewed_blocking()); return
+            if self.path == "/api/v1/blocking/raw":
+                p = STATE / "blockmon.json"; self.out(200, p.read_text() if p.exists() else "{}", "application/json"); return
+            self.send_error(404)
+        except Exception as e: self.send_error(500, str(e))
+    def do_POST(self):
+        who = self.auth()
+        if not who: self.js(401, {"error": _('access denied')}); return
+        role, label = who
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+        if self.path == "/api/v1/tokens":
+            if role != "admin": self.js(403, {"error": _('admin only')}); return
+            try: body = json.loads(raw or "{}"); tok = token_add(body["role"], body["label"])
+            except Exception: tok = None
+            if tok: self.js(200, {"ok": True, "token": tok, "tokens": token_list()})
+            else: self.js(400, {"ok": False, "error": _('Role admin|family, label 1-40 characters')})
+            return
+        m = re.fullmatch(r"/api/v1/tokens/(\d+)/revoke", self.path)
+        if m:
+            if role != "admin": self.js(403, {"error": _('admin only')}); return
+            # Do not revoke the last admin token.
+            tl = token_list(); victim = next((t for t in tl if t["id"] == m.group(1)), None)
+            if victim and victim["role"] == "admin" and len([t for t in tl if t["role"] == "admin"]) <= 1: self.js(400, {"ok": False, "error": _('last admin token')}); return
+            ok = token_revoke(m.group(1)); self.js(200 if ok else 400, {"ok": ok, "tokens": token_list()}); return
+        if self.path == "/api/v1/blocking/review":
+            if role != "admin": self.js(403, {"error": _('admin only')}); return
+            try: body = json.loads(raw or "{}"); rv = body["reviews"]; assert isinstance(rv, dict) and len(raw) < 2_000_000
+            except Exception: self.js(400, {"error": _('reviews missing')}); return
+            p = STATE / "blockmon-review.json"; tmp = p.with_suffix(".tmp"); tmp.write_text(json.dumps({"reviews": rv, "time": time.time()}, ensure_ascii=False)); os.replace(tmp, p)
+            self.js(200, {"ok": True, "n": len(rv)}); return
+        if self.path in ("/blocking", "/api/v1/blocking"):
+            if role != "admin": self.js(403, {"error": _('admin only')}); return
+            body = json.loads(raw or "{}") if self.path.startswith("/api/") else {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+            d, dom = body.get("d") or body.get("decision"), (body.get("domain") or "").lower()
+            ok = d in ("allow", "deny", "dismiss", "later") and re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,62}\.)+[a-z]{2,24}", dom) is not None
+            if ok: ok = subprocess.run(["sudo", "-n", "/usr/local/bin/dnspreload-blockmon", "apply", d, dom, "panel"], capture_output=True, timeout=30).returncode == 0
+            if self.path.startswith("/api/"): self.js(200 if ok else 400, {"ok": ok}); return
+            if not ok: self.out(400, _('Invalid input.')); return
+            self.out(303, "", extra=(("Location", "/blocking"),)); return
+        m = re.fullmatch(r"/(?:u/)?switch/([a-z][a-z0-9-]{1,30})", self.path) or re.fullmatch(r"/api/v1/switch/([a-z][a-z0-9-]{1,30})", self.path)
+        if not m: self.send_error(404); return
+        name = m.group(1)
+        if name not in [sw["name"] for sw in self.visible(role)]: self.js(403, {"error": _('not available')}); return
+        if self.path.startswith("/api/"):
+            try: body = json.loads(raw or "{}")
+            except ValueError: self.js(400, {"error": "json"}); return
+            ok = switch_set(name, body.get("action"), body.get("minutes"))
+            self.js(200 if ok else 400, {"ok": ok, "switch": next((sw for sw in switches() if sw["name"] == name), None)}); return
+        a = urllib.parse.parse_qs(raw).get("a", [""])[0]; mm = re.fullmatch(r"on(\d{1,3})", a)
+        if a == "off": switch_set(name, "off")
+        elif mm: switch_set(name, "on", int(mm.group(1)))
+        self.out(303, "", extra=(("Location", "/u" if self.path.startswith("/u/") or role != "admin" else "/"),))
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "panel"
+    if cmd == "metrics": metrics()
+    elif cmd == "render": print(page(snapshot()))
+    else:
+        bind = _setting("PANEL_BIND", "127.0.0.1"); port = int(_setting("PANEL_PORT", "8053"))
+        ThreadingHTTPServer((bind, port), H).serve_forever()

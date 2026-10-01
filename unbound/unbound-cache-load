@@ -1,0 +1,7 @@
+#!/bin/sh
+# Load the last cache dump after unbound (re)started. Expired entries are not in the dump:
+# dnspreload-after-boot refreshes the network's own domains right after boot.
+D=/var/lib/unbound/cache/unbound.cache
+[ -s "$D" ] || exit 0
+i=0; while ! unbound-control status >/dev/null 2>&1; do i=$((i+1)); [ $i -gt 20 ] && exit 0; sleep 0.5; done
+unbound-control load_cache < "$D" >/dev/null

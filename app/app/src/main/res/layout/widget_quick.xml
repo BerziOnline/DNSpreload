@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="@drawable/widget_bg" android:padding="12dp">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+        <ImageView android:layout_width="22dp" android:layout_height="22dp" android:src="@drawable/logo_mark" android:contentDescription="@null"/>
+        <TextView android:id="@+id/w_title" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:layout_marginStart="8dp"
+            android:text="@string/ad_blocker" android:textColor="#E6EDF3" android:textSize="15sp" android:textStyle="bold"/>
+    </LinearLayout>
+    <TextView android:id="@+id/w_state" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp"
+        android:text="@string/loading" android:textColor="#22C55E" android:textSize="20sp" android:textStyle="bold"/>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:layout_marginTop="8dp">
+        <Button android:id="@+id/w_btn30" style="?android:attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_weight="1" android:layout_height="40dp"
+            android:background="@drawable/widget_btn" android:text="@string/widget_off_30" android:textColor="#F59E0B" android:textSize="13sp" android:layout_marginEnd="6dp"/>
+        <Button android:id="@+id/w_btn120" style="?android:attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_weight="1" android:layout_height="40dp"
+            android:background="@drawable/widget_btn" android:text="@string/widget_off_120" android:textColor="#F59E0B" android:textSize="13sp"/>
+        <Button android:id="@+id/w_btnon" style="?android:attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_weight="1" android:layout_height="40dp"
+            android:background="@drawable/widget_btn_on" android:text="@string/turn_on" android:textColor="#0B1220" android:textSize="13sp" android:visibility="gone"/>
+    </LinearLayout>
+</LinearLayout>

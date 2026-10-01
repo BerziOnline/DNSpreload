@@ -1,0 +1,9 @@
+[Unit]
+Description=dnspreload v2: preload one merged-final slice hourly at :20 (replaces nightly run at 04:05)
+
+[Timer]
+OnCalendar=*-*-* *:20:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target

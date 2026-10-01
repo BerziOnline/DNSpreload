@@ -1,108 +1,125 @@
+<p align="center"><img src="brand/dnspreload-logo.svg" width="120" alt="DNSpreload logo"></p>
+
 # DNSpreload
+
 *Being smarter, being faster, being prepared. Preload your unbound!*
 
-## Was das?
-DNSpreload dient dem Pre-Caching von Domains für einen unbound-Server.
+DNSpreload keeps the cache of your own recursive **unbound** resolver warm, so the first visit to a website is answered from cache in about a millisecond instead of after a full walk through the DNS hierarchy.
 
-### Warum?
-Wer im eigenen Netzwerk einen DNS-Server betreibt, um bspw. einen Ad-Blocker zu nutzen oder seine Privatsphäre zu erhöhen, der steht vor der Entscheidung für seinen eigenen DNS-Server einen weiteren Upstream-DNS zu nutzen oder diesen direkt per iterativen Anfragen bei den Root- bzw. TLD-Servern anfragen zu lassen. 
-Letzteres birgt einen höheren Grad an Privatsphäre in sich, da es keinen Intermediär mehr zwischen den eigenen Anfragen und dem eigentlichen "Root-Walk" gibt. Ersteres ist jedoch schneller, da DNS-Server wie bspw. von Google und Cloudflare deutlich schnellere Responses liefern.
+## Why preload?
 
-#### Geschwindigkeit
-Wieso werden die Queries schneller beantwortet, wenn man bspw. Google oder Cloudflare als Upstream-Server verwendet?
-Die Server haben eine breite Ansammlung an Caching-Einträgen und antworten blitzschnell und unmittelbar mit einem nicht-autoritativem Response. Warum sich diese Idee nicht selbst zu Gute machen und die Einträge im DNS-Server bereits cachen **bevor** man diese benötigt? 
-Natürlich kann man nicht das ganze Internet cachen. Aber wie wäre es mit dem Anteil, den man davon in 95% der Zeit benutzt?
+If you run your own DNS server – for an ad blocker like Pi-hole or for privacy – you have two choices:
 
-#### Privatsphäre
-Durch diese Maßnahme erhöht man seine Privatsphäre in puncto DNS-Abfragen auf ein Maximum. Eine gängige Praxis ist es seine Privatsphäre mit Datensparsamkeit zu schützen. Eine unterschätzte Praxis ist es aber auch seine Daten mit Daten-Flooding zu schützen. Hier kommen beide Strategien zum Tragen:
-Aus dem Netzwerk heraus werden täglich tausende Domains nahezu willkürlich vor-gecached. Es ist für Außenstehende Provider und Anbieter nicht ersichtlich, welche davon wirklich benötigt werden und welche nicht. Anschließende DNS-Anfragen der Clients innerhalb des eigenen Netzwerkes für den wirklichen Besuch der Seiten finden nur noch lokal statt, da der DNS-Server jede Anfrage nicht-autoritativ beantworten kann.
+| | Forward to Google / Cloudflare / Quad9 | Resolve yourself (recursive unbound) |
+|---|---|---|
+| Speed | fast: their caches already hold almost everything | slow on the first lookup: root → TLD → domain, often 50–300 ms |
+| Privacy | one company sees every name you look up | no middleman; each server only sees the part it is responsible for |
 
-## Wie funktioniert das?
-Das Script zieht sich einen Dump von Top-Domains in Deutschland, sowie weiteren TLDs und bietet die Möglichkeit dies auch durch eine persönliche Browser-History zu ergänzen. Es werden die 1mio meistgenutzten Domains gezogen, um im Anschluss beliebige Anteile davon im unbound-cache vorzuladen.
+DNSpreload gives you both: it resolves the names you are likely to need **before** you need them. Your devices then get cached answers locally, and the upstream servers see a steady stream of tens of thousands of lookups every day – which ones you actually visit is lost in the noise.
 
-Das Script kann von jedem Client im Netz mit funktionierender Bash ausgeführt werden, es empfiehlt sich jedoch deutlich das Script auf dem unbound-Server selbst auszuführen, um die Flut an DNS-Abfragen lokal zu initiieren und nicht unnötigerweise durch das lokale Netz zwischen Client & Server zu senden.
+You cannot cache the whole internet. But you can cache the part you use 95 % of the time.
 
-Es wird außerdem unter der Datei "dns-cache.log" ein einfaches Logging abgelegt, um nachzuvollziehen können, ob das automatisierte Dumping funktioniert.
-Hilfreich ist außerdem zur Kontrolle des Cache-Aufwuchses bspw:
+## What's new in v2
 
-`sudo unbound-control dump_cache | wc -l`
+v1 was a set of Bash scripts that fired the top domains at unbound once a night. v2 is a rewrite with the same idea, done properly:
 
-### Disclaimer
-Als reiner Netzwerktechniker habe ich mir über **die Sache selbst** Gedanken gemacht und diese gelöst. In puncto Skripting/Programmierung gibt es mit ziemlicher Sicherheit elegantere und vor allem anwenderfreundlichere Lösungen in der Umsetzung. Seht es mir nach, dass das ein egoistisch angelegtes Skript ist, welches auf mehrfache Anfrage von mir hier nun in genau dieser Version veröffentlicht wird.
+- **Learns from your own network.** Every name your devices resolved in the last 90 days (from Pi-hole's database) is preloaded – plus the most popular domains in Germany and worldwide. Names your blocklists refuse are left out.
+- **Flowing refresh instead of a nightly burst.** The list is split into 22 fixed slices; one slice is refreshed every hour at 5 queries per second. Every name is renewed every 22 hours, safely inside unbound's 24-hour `serve-expired` window – and your router never sees a spike. (A single burst of 70,000 lookups at 100 qps once overloaded a consumer router's NAT table.)
+- **Smarter top lists.** Tranco (Umbrella as fallback), optional Cloudflare Radar confirmation, and a **TLD filter**: keep only the TLDs that matter to you (or drop the ones that don't) – filtered first, then cut to your target count.
+- **Survives restarts.** The cache is dumped every 6 hours and on stop, and loaded on start; right after boot your network's own names are refreshed first.
+- **Web panel.** Cache size, hit rate, response times, last runs, blocking statistics – mobile-friendly, English or German.
+- **Switches.** Turn the ad blocker off for 30 min or 2 h – for the whole network or for a group of devices – with automatic switch-back.
+- **Blocking monitor.** Deterministically finds domains that are probably blocked by mistake (broken apps retry, ad beacons don't) or trackers that slipped through. Suggestions only; you decide.
+- **Android app.** Status, switches with countdown, home-screen widget, quick-settings tile, statistics and the blocking suggestions – with role-based tokens (admin / family).
+- **Everything is a setting.** One commented `config.env`, no code changes needed.
 
-## HowTo
-### 1. Variablen anpassen
-Das Skript "preload_topdomains.sh" muss um folgende Variablen angepasst werden:
+## How it works
+
 ```
-SCRIPT_PATH=<PFAD-IN-WELCHEM-SKRIPT-LIEGT>
-LOG_FILE=<ABSOLUTER-PFAD-ZUM-LOGFILE>
-ANZAHL_DE_DOMAINS=<WIE-VIELE-DE_DOMAINS-CASHEN>
-ANZAHL_REST_DOMAINS=<WIE-VIELE-NICHT_DE_DOMAINS-CASHEN>
-```
-
-### 2. Funktion aufrufen
-Das Skript verfügt über die folgenden 3 Funktionen:
-
-1. Updaten der Top-Domains
-2. Sequentieller Preload vorbereiteter Top-Domains
-3. Paralleler Preload vorbereiteter Top-Domains
-
-#### Updaten der Top-Domains
-`./preload_topdomains.sh 1` oder in der interaktiven Abfrage `1` wählen.
-Es werden die aktuellesten Top-Domains gezogen, abgelegt und folgende Dateien abgelegt:
-```
-top-1m.csv
-top-1m.txt
-DEall.txt
-DEtop<ANZAHL>.txt
-RELEVANTall.txt
-RELEVANTtop<ANZAHL>.txt
-mergedDomainsToCache.txt
+             top lists (Tranco/Umbrella/Radar)   Pi-hole query history
+                              \                     /
+   03:50 daily  dnspreload update  →  lists/merged-final.txt  (~60,000 names)
+                                             |
+   hourly :20   dnspreload preload slice     |  1/22 of the list, 5 q/s, via dnsperf
+                                             v
+                   unbound 127.0.0.1:5335  (directly – not through Pi-hole, so your query log stays clean)
+                                             ^
+   your devices → Pi-hole → unbound          |  answered from cache
 ```
 
-#### Sequentieller Preload
-`./preload_topdomains.sh 2` oder in der interaktiven Abfrage `2` wählen.
-Es wird eine sequentielle DNS-Auflösung aller vorbereiteter Domains durchgeführt.
+The preload asks unbound for each name. If the entry is still valid, unbound answers from cache and nothing leaves your network. If it expired, unbound fetches it fresh – exactly what would otherwise happen the next time someone opens the site.
 
-#### Paralleler Preload
-`./preload_topdomains.sh 3 <NO-OF-THREADS>` oder in der interaktiven Abfrage `3` wählen.
-Es wird in der übergebenen Anzahl an Threads eine parallele DNS-Auflösung aller vorbereiteter Domains durchgeführt.
+## Requirements
 
-### 3. Tägliches updaten der Domains & des Caches
-Einmal am Tage werden die Top-Domains gezogen und abgelegt und daraufhin erneut per DNS-Query aufgelöst, um Cache-Einträge aktuell und im Cache zu halten.
+- Debian/Ubuntu (or similar with systemd), Python ≥ 3.9 (standard library only)
+- **Pi-hole v6** and **unbound** on the same machine, unbound listening on `127.0.0.1:5335` with `remote-control` enabled
+- `dnsperf`, `sqlite3`, `curl`
 
-Beispielsweise:
+## Install
+
 ```
-crontab -e
-# Hole Top-Domains um 04:15 Uhr
-15 4 * * * /home/pi/Scripts/unbound-cache-dumping/preload_topdomains.sh 1
-# Starte Preload von Top-Domains sequentiell um 04:30 Uhr
-30 4 * * * /home/pi/Scripts/unbound-cache-dumping/preload_topdomains.sh 2
+git clone https://github.com/BerziOnline/DNSpreload.git && cd DNSpreload
+sudo ./install.sh --check      # prerequisites only
+sudo ./install.sh              # install or update; keeps your config.env, lists and state
 ```
 
-### 4. Cache von unbound dumpen und laden
-Damit der angewachsene Cache von unbound nicht verloren geht, wenn der Server oder Service neugestartet wird, bietet es sich an diesen regelmäßig zu dumpen und beim Start des Services direkt zu laden.
+Recommended unbound settings are in [`unbound/unbound-dnspreload.conf.example`](unbound/unbound-dnspreload.conf.example); the two lines that matter most are `serve-expired: yes` and `serve-expired-ttl: 86400`.
 
-#### Dumpen
-Dazu dient das Skript `dumb_cach_from_unbound.sh`. Bitte die Variablen im oberen Abschnitt anpassen.
+Then set `PANEL_BIND` (and `ADMIN_NETS`) in `/opt/dnspreload-v2/config.env` and open `http://<dns-server>:8053/`.
 
-Das Skript könnte bspw. alle 3 Stunden als Cronjob ausgeführt werden:
+## Settings
+
+All in `/opt/dnspreload-v2/config.env` – changes apply on the next run.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `LEARN_DAYS` | 90 | learn every name your network resolved in this window |
+| `TOP_DE` / `TOP_INTL` | 0 (all) / 20000 | how many `.de` / international names from the top list |
+| `INTL_TLD_WHITELIST` / `INTL_TLDS` | true / com,net,org,… | keep (or with `false`: drop) these TLDs; applied **before** `TOP_INTL` |
+| `SOURCES` | tranco,umbrella | top-list sources, first reachable wins |
+| `RADAR_TOKEN` | – | optional Cloudflare Radar token (read-only) |
+| `SLICE_HOURS` / `SLICE_QPS` | 22 / 5 | hourly slice: number of slices and queries per second |
+| `QPS` | 25 | speed of manual full runs and network runs |
+| `UI_LANG` | en | panel and monitor language: `en` or `de` |
+| `PANEL_BIND` / `PANEL_PORT` | 127.0.0.1 / 8053 | where the panel listens |
+| `ADMIN_NETS` | 127.0.0. | IP prefixes with admin view without token |
+| `SYSTEM_CLIENTS` | 127.0.0.1 | IPs left out of statistics (preload, servers, router) |
+
+Your own additions: `lists/static-manual.txt`. Never preload: `lists/exclude.txt`.
+
+## Schedule
+
+| When | Timer | What |
+|---|---|---|
+| daily 03:50 | `dnspreload-update` | rebuild all lists (~1 min) |
+| hourly :20 | `dnspreload-slice` | refresh one slice (~3,300 names, ~11 min) |
+| daily 16:00 | `dnspreload-network` | refresh the names your network used in the last 24 h |
+| after boot | `dnspreload-after-boot` | refresh your network's names first |
+| every 6 h | `unbound-cache-dump` | save the cache for a warm restart |
+| every 6 h | `dnspreload-blockmon` | blocking monitor |
+| – | `dnspreload-full` | everything at once, manual only: `systemctl start dnspreload-full` |
+
+`systemctl list-timers 'dnspreload*'` shows the last and next runs.
+
+## Commands
+
 ```
-crontab -e
-# Alle 3 Stunden den Cache von Unbound als Dump ablegen, um diesen beim Service-Start wieder herein zu laden
-0 */3 * * * /home/pi/Scripts/unbound-cache-dumping/dump_cache_from_unbound.sh
+dnspreload status             cache size, hit rate, list sizes, last run, how much of each list is cached
+dnspreload update             rebuild the lists now
+dnspreload preload slice      refresh the current slice now   (also: full | network)
+dnspreload-token add admin "my phone"      create a token for the app (shown once)
+dnspreload-switch list                     all switches and their state
+dnspreload-blockmon test                   self-test of the blocking monitor
 ```
 
-#### Cache-Dump bei jedem Unbound-Start automatisiert laden
-Dazu bindet man einen ExecStartPost an den unbound-service selbst. Verwendet wird vom Service das Script `load_cache_on_startup.sh`.
-1. Skript `load_cache_on_startup.sh` in beliebiges Verzeichnis legen (es bietet sich der Pfad der anderen Skripte dieser Gesamtlösung hier an)
-2. Eine Kopie von /lib/systemd/system/unbound.service nach /etc/systemd/system/unbound.service anlegen und um ExecStartPost=/pfad/zum/load_cach_on_startup.sh ergänzen, um dieses Skript bei jedem Start von Unbound im Anschluss automatisiert auszuführen
+## Web panel, API and app
 
+- **Panel** `http://<dns-server>:8053/` – status for admins; `/u/<token>` a simple page with just the switches for family members; `/blocking` the suggestions.
+- **Grafana** `GET /metrics` (InfluxDB line protocol) – e.g. Telegraf `inputs.http` → InfluxDB.
+- **API** `/api/v1/status`, `/stats`, `/daystats`, `/switches`, `/blocking`, `/tokens` – token via `Authorization: Bearer …`.
+- **Switches** are defined in `/etc/dnspreload/switches.json` (see `etc/switches.example.json`): either the whole network (`"mode": "blocking"`) or a Pi-hole group with its devices.
+- **Android app** in [`app/`](app/): `cd app && ./gradlew assembleRelease` (Android SDK, JDK 21). Enter the server address and a token on first start. A ready-made APK can be attached to each release.
 
-### 5. Optionales Hinzuziehen von Firefox Browser-History
-Da in den top-1mio Domains viele lokale/individuelle Domains fehlen werden, die es nicht in die weltweite Rangliste geschafft haben, bietet es sich an diese Domains in das Pre-Caching mit aufzunehmen. Das Skript ist so geschrieben, dass es diese History mit hinzuzieht, sobald sie abgelegt ist. 
-Es ist wichtig zu wissen, dass hier nicht zwingend eine regelmäßige Aktualisierung von Nöten ist. Es ist bereits ein Gewinn, wenn dies überhaupt auch nur einmal gedumped und mit abgelegt wird. Natürlich kann man das beliebig oft aktualisieren oder bei Bedarf auch automatisieren.
+## Upgrading from v1
 
-Dazu dient das Skript `firefoxDNSdump.sh`, welches auf einem Client ausgeführt werden sollte, der den Firefox aktiv nutzt, um überhaupt erst eine sinnvolle History dumpen zu können.
-Da ich selbst kein Windows-System besitze, ist es derzeit nur für Linux-Clients ausgelegt, sollte aber auch für Windows-Systeme anpassbar sein. 
-Es ist das Paket **sqlite3** nötig. Vor dem Start muss in dem Skript der Pfad zum Profil des Browsers angepasst werden und der `scp`-Befehl am Ende des Skriptes (dieser kopiert den Dump zum DNS-Server).
+v1 (the Bash scripts) is kept as release v1.0 (see [Releases](../../releases)). v2 does not use any v1 files: remove the old cron jobs, then run `install.sh`.

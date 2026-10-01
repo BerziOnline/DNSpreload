@@ -1,0 +1,15 @@
+[Unit]
+Description=dnspreload v2: update lists (top domains, learned network domains, merged-final)
+After=network-online.target unbound.service pihole-FTL.service
+
+[Service]
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/dnspreload-v2/lists /opt/dnspreload-v2/state /opt/dnspreload-v2/logs
+Type=oneshot
+User=dnspreload
+WorkingDirectory=/opt/dnspreload-v2
+ExecStart=/opt/dnspreload-v2/dnspreload update
+Nice=10

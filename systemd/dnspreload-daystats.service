@@ -1,0 +1,9 @@
+[Unit]
+Description=dnspreload daily statistics for app/panel
+After=pihole-FTL.service
+[Service]
+Type=oneshot
+User=dnspreload
+ExecStart=/usr/local/bin/dnspreload-daystats
+Nice=10
+IOSchedulingClass=idle

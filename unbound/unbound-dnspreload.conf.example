@@ -1,0 +1,49 @@
+# Recommended unbound settings for DNSpreload (Debian: /etc/unbound/unbound.conf.d/10-server.conf).
+# Only the lines marked [required] are needed for preloading; the rest is what we run in production.
+server:
+    interface: 127.0.0.1
+    port: 5335                          # [required] Pi-hole forwards to 127.0.0.1#5335; DNSpreload talks to it directly
+    access-control: 127.0.0.0/8 allow
+    do-ip6: no                          # set yes if your network uses IPv6 upstream
+
+    # --- cache size: ~60k preloaded names + your network fit easily ------------------
+    msg-cache-size: 128m
+    rrset-cache-size: 256m              # rule of thumb: 2x msg-cache-size
+    key-cache-size: 32m
+    neg-cache-size: 16m
+
+    # --- the part that makes preloading pay off --------------------------------------
+    serve-expired: yes                  # [required] answer from cache even after the TTL ran out ...
+    serve-expired-ttl: 86400            # [required] ... for at most 24 h. The hourly slice refreshes every name every 22 h.
+    serve-expired-client-timeout: 0     # answer immediately from the expired entry, refresh in the background
+    serve-expired-reply-ttl: 30         # clients ask again soon and then get the fresh answer
+    prefetch: yes                       # refresh popular entries shortly before they expire
+    prefetch-key: yes
+    cache-min-ttl: 300                  # keep honest TTLs; do not inflate them
+    cache-max-ttl: 86400
+
+    # --- speed & privacy ----------------------------------------------------------------
+    aggressive-nsec: yes
+    qname-minimisation: yes
+    minimal-responses: yes
+    harden-glue: yes
+    harden-dnssec-stripped: yes
+    harden-below-nxdomain: yes
+    edns-buffer-size: 1232
+    so-reuseport: yes
+    extended-statistics: yes            # the panel reads cache hits and prefetches via unbound-control
+
+remote-control:
+    control-enable: yes
+    control-interface: /run/unbound.ctl # unix socket: no network port, no certificates
+
+# Optional: local copy of the root zone (RFC 8806) - saves the root-server round trip for every new TLD.
+# auth-zone:
+#     name: "."
+#     primary: 199.9.14.201
+#     primary: 192.33.4.12
+#     primary: 192.0.47.132
+#     fallback-enabled: yes
+#     for-downstream: no
+#     for-upstream: yes
+#     zonefile: "/var/lib/unbound/root.zone"
