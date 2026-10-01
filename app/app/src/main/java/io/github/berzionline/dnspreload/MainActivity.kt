@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -102,7 +103,7 @@ fun SetupScreen(vm: AppState) {
 @Composable fun KV(k: String, v: String, tone: Color = Fg, sub: String? = null) {
     Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) { Text(k, color = Muted, fontSize = 14.sp); sub?.let { Text(it, color = Muted, fontSize = 11.sp) } }
-        Text(v, color = tone, fontWeight = FontWeight.Medium, fontSize = 16.sp)
+        Spacer(Modifier.width(8.dp)); Text(v, color = tone, fontWeight = FontWeight.Medium, fontSize = 16.sp)
     }
 }
 @Composable fun Chapter(title: String, tone: Color, sub: String) {
@@ -111,9 +112,9 @@ fun SetupScreen(vm: AppState) {
         Text(sub, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(start = 14.dp))
     }
 }
-fun fmt(n: Long) = String.format(Locale.GERMANY, "%,d", n)
-fun hhmm(epoch: Long) = SimpleDateFormat("HH:mm", Locale.GERMANY).format(Date(epoch * 1000))
-fun dmy(epoch: Long) = SimpleDateFormat("dd.MM. HH:mm", Locale.GERMANY).format(Date(epoch * 1000))
+fun fmt(n: Long) = String.format(Locale.getDefault(), "%,d", n)
+fun hhmm(epoch: Long) = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(epoch * 1000))
+fun dmy(epoch: Long) = SimpleDateFormat(android.text.format.DateFormat.getBestDateTimePattern(Locale.getDefault(), "dMMHHmm"), Locale.getDefault()).format(Date(epoch * 1000))
 fun JSONObject.list(k: String) = optJSONArray(k)?.let { a -> (0 until a.length()).map(a::getJSONObject) } ?: emptyList()
 
 @Composable
@@ -253,7 +254,7 @@ fun StatsTab(vm: AppState) {
             Section(stringResource(R.string.streak), Green, hint = stringResource(R.string.streak_hint)) {
                 Row(verticalAlignment = Alignment.Bottom) { Text((d?.streak ?: 0).toString(), fontSize = 44.sp, fontWeight = FontWeight.Bold, color = Green); Spacer(Modifier.width(8.dp)); Text(stringResource(R.string.streak_days), color = Muted, modifier = Modifier.padding(bottom = 10.dp)) }
                 d?.record?.let { KV(stringResource(R.string.record_day), stringResource(R.string.blocked_count, fmt(it.optLong("blocked"))), Fg, sub = it.optString("day")) }
-                d?.since?.let { KV(stringResource(R.string.since_start), stringResource(R.string.blocked_count, fmt(it.optLong("blocked"))), Green, sub = stringResource(R.string.of_queries, fmt(it.optLong("queries")))) }
+                d?.since?.let { KV(stringResource(R.string.since_start, it.optLong("from").let { f -> if (f > 0) SimpleDateFormat(android.text.format.DateFormat.getBestDateTimePattern(Locale.getDefault(), "dMMM"), Locale.getDefault()).format(Date(f * 1000)) else "" }), stringResource(R.string.blocked_count, fmt(it.optLong("blocked"))), Green, sub = stringResource(R.string.of_queries, fmt(it.optLong("queries")))) }
             }
         }
         item {
@@ -285,7 +286,7 @@ fun StatsTab(vm: AppState) {
         item {
             val today = c?.list("days")?.lastOrNull()
             Section(stringResource(R.string.instant_answers), Blue, hint = stringResource(R.string.instant_hint)) {
-                Row(verticalAlignment = Alignment.Bottom) { Text(today?.optDouble("hit_percent")?.let { String.format(Locale.GERMANY, "%.1f", it) } ?: stringResource(R.string.unavailable), fontSize = 44.sp, fontWeight = FontWeight.Bold, color = Blue); Text(stringResource(R.string.percent_unit), color = Muted, modifier = Modifier.padding(bottom = 10.dp)); Spacer(Modifier.width(12.dp)); Text(stringResource(R.string.today_lower), color = Muted, modifier = Modifier.padding(bottom = 10.dp)) }
+                Row(verticalAlignment = Alignment.Bottom) { Text(today?.optDouble("hit_percent")?.let { String.format(Locale.getDefault(), "%.1f", it) } ?: stringResource(R.string.unavailable), fontSize = 44.sp, fontWeight = FontWeight.Bold, color = Blue); Text(stringResource(R.string.percent_unit), color = Muted, modifier = Modifier.padding(bottom = 10.dp)); Spacer(Modifier.width(12.dp)); Text(stringResource(R.string.today_lower), color = Muted, modifier = Modifier.padding(bottom = 10.dp)) }
                 today?.let { KV(stringResource(R.string.from_internet), fmt(it.optLong("recursive")), Fg, sub = it.optDouble("avg_recursive_ms").takeIf { v -> !v.isNaN() }?.let { v -> stringResource(R.string.average_ms, v.toString()) }) }
                 c?.optJSONObject("record_day")?.let { KV(stringResource(R.string.record_day), stringResource(R.string.percentage, it.optDouble("hit_percent").toString()), Blue, sub = it.optString("day")) }
             }
@@ -313,10 +314,10 @@ fun StatsTab(vm: AppState) {
 fun BlockingTab(vm: AppState) {
     val b = vm.blocking
     LazyColumn(Modifier.fillMaxSize()) {
-        item { Text(stringResource(R.string.review_intro, b?.reviewedAt?.let { stringResource(R.string.review_as_of, dmy(it)) } ?: "", b?.pending ?: 0, b?.dropped ?: 0), color = Muted, fontSize = 12.sp, modifier = Modifier.padding(16.dp, 8.dp)) }
-        item { Chapter(stringResource(R.string.over_blocked), Green, stringResource(R.string.suggestion_count, b?.over?.size ?: 0)) }
+        item { Text(if (b != null && b.reviewedAt == null) stringResource(R.string.review_intro_raw) else stringResource(R.string.review_intro, b?.reviewedAt?.let { stringResource(R.string.review_as_of, dmy(it)) } ?: "", b?.pending ?: 0, b?.dropped ?: 0), color = Muted, fontSize = 12.sp, modifier = Modifier.padding(16.dp, 8.dp)) }
+        item { Chapter(stringResource(R.string.over_blocked), Green, (b?.over?.size ?: 0).let { n -> pluralStringResource(R.plurals.suggestion_count, n, n) }) }
         items(b?.over ?: emptyList(), key = { "o" + it.domain }) { CandidateCard(it, vm, "allow", stringResource(R.string.allow), Green) }
-        item { Chapter(stringResource(R.string.under_blocked), Red, stringResource(R.string.suggestion_count, b?.under?.size ?: 0)) }
+        item { Chapter(stringResource(R.string.under_blocked), Red, (b?.under?.size ?: 0).let { n -> pluralStringResource(R.plurals.suggestion_count, n, n) }) }
         items(b?.under ?: emptyList(), key = { "u" + it.domain }) { CandidateCard(it, vm, "deny", stringResource(R.string.deny), Red) }
         item { Spacer(Modifier.height(12.dp)) }
     }
@@ -336,7 +337,7 @@ fun CandidateCard(c: Candidate, vm: AppState, action: String, actionLabel: Strin
             }
             Text(it.reason, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
         }
-        Text(stringResource(R.string.candidate_counts, c.clients, c.queries, c.why.joinToString(stringResource(R.string.list_separator))), color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+        Text(pluralStringResource(R.plurals.device_count, c.clients, c.clients) + stringResource(R.string.list_separator) + stringResource(R.string.candidate_counts, c.queries, c.why.joinToString(stringResource(R.string.list_separator))), color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Button({ vm.decide(c, action) }, Modifier.weight(1.2f), contentPadding = PaddingValues(4.dp, 10.dp), colors = ButtonDefaults.buttonColors(containerColor = tone, contentColor = Bg)) { Text(actionLabel, maxLines = 1) }

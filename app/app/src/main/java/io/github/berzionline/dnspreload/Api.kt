@@ -72,7 +72,7 @@ class Api(baseUrl: String, private val token: String?, client: OkHttpClient? = n
     fun tokens(): List<Token> = parseTokens(get("/api/v1/tokens"))
     fun tokenAdd(role: String, label: String): Pair<String?, List<Token>> { val o = post("/api/v1/tokens", JSONObject().put("role", role).put("label", label)); return o.optString("token").ifBlank { null } to parseTokens(o) }
     fun tokenRevoke(id: String): List<Token> = parseTokens(post("/api/v1/tokens/$id/revoke", JSONObject()))
-    private fun parseTokens(o: JSONObject): List<Token> = (o.optJSONArray("tokens") ?: JSONArray()).let { a -> (0 until a.length()).map { i -> val t = a.getJSONObject(i); Token(t.getString("id"), t.optString("role"), t.optString("label"), t.optString("token").ifBlank { null }, if (t.isNull("created")) null else t.optLong("created"), if (t.isNull("last_seen")) null else t.optLong("last_seen")) } }
+    private fun parseTokens(o: JSONObject): List<Token> = (o.optJSONArray("tokens") ?: JSONArray()).let { a -> (0 until a.length()).map { i -> val t = a.getJSONObject(i); Token(t.getString("id"), t.optString("role"), t.optString("label"), (if (t.isNull("token")) "" else t.optString("token")).ifBlank { null }, if (t.isNull("created")) null else t.optLong("created"), if (t.isNull("last_seen")) null else t.optLong("last_seen")) } }
     fun decide(domain: String, decision: String): Boolean = post("/api/v1/blocking", JSONObject().put("domain", domain).put("decision", decision)).optBoolean("ok")
 
     private fun parseSwitch(s: JSONObject): Switch {

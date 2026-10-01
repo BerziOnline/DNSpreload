@@ -215,3 +215,20 @@ def test_family_page_renders_with_blocker_active(tmp_path, monkeypatch, lang):
     page = m.family_page(sw, "Test user")
     assert "<button name=a value=on30>" in page
     assert request(m, "GET", "/u", "family")["code"] == 200
+
+
+def test_blocking_without_reviewer_shows_raw_candidates(tmp_path, monkeypatch):
+    """Public installs have no nightly reviewer: candidates must still be listed, not stay 'pending' forever."""
+    synthetic_state(tmp_path)
+    (tmp_path / "state" / "blockmon-review.json").unlink()
+    m = load_panel(tmp_path, monkeypatch, "en")
+    d = m.reviewed_blocking()
+    assert len(d["over"]) == 1 and len(d["under"]) == 1 and d["pending"] == 0
+    assert d["over"][0]["review"] is None and d["reviewed_at"] is None
+
+
+def test_blocking_with_reviewer_keeps_gating(tmp_path, monkeypatch):
+    synthetic_state(tmp_path)
+    m = load_panel(tmp_path, monkeypatch, "en")
+    d = m.reviewed_blocking()
+    assert all(x["review"] is not None for x in d["over"] + d["under"])

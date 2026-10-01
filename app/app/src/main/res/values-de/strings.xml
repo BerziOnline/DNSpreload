@@ -58,7 +58,7 @@
     <string name="streak_hint">"Tage in Folge, an denen der Blocker etwas gesperrt hat."</string>
     <string name="streak_days">"Tage am Stück"</string>
     <string name="record_day">"Rekordtag"</string>
-    <string name="since_start">"Seit Start (25.09.)"</string>
+    <string name="since_start">"Seit Start (%1$s)"</string>
     <string name="last_14_days">"Letzte 14 Tage"</string>
     <string name="yesterday">"Gestern"</string>
     <string name="ranking_today">"Rangliste heute"</string>
@@ -132,16 +132,24 @@
     <string name="average_ms">"im Schnitt %1$s ms"</string>
     <string name="times_count">"%1$d ×"</string>
     <string name="milliseconds">"%1$s ms"</string>
+    <string name="review_intro_raw">"Kandidaten alle 6 h ohne KI aus dem eigenen Anfrage-Log ermittelt. Du entscheidest."</string>
     <string name="review_intro">"Kandidaten alle 6 h ohne KI; Einordnung nachts durch ein Sprachmodell%1$s. %2$d warten noch auf Einordnung, %3$d als unsinnig aussortiert."</string>
     <string name="review_as_of">" (Stand %1$s)"</string>
-    <string name="suggestion_count">"%1$d Vorschläge"</string>
     <string name="if_blocked">"Bei Sperre: %1$s"</string>
     <string name="recommendation">"Empfehlung: %1$s"</string>
     <string name="review_confidence">"  ·  %1$s  ·  %2$d %% sicher"</string>
     <string name="review_revisions">"  ·  %1$d× nachgeprüft"</string>
-    <string name="candidate_counts">"%1$d Geräte · %2$d Anfragen · %3$s"</string>
+    <string name="candidate_counts">"%1$d Anfragen · %2$s"</string>
     <string name="list_separator">" · "</string>
     <string name="quick_off_until">"AUS · wieder an um %1$s"</string>
     <string name="tile_off_until">"aus bis %1$s"</string>
     <string name="server_error">"Server: %1$d"</string>
+    <plurals name="suggestion_count">
+        <item quantity="one">"%1$d Vorschlag"</item>
+        <item quantity="other">"%1$d Vorschläge"</item>
+    </plurals>
+    <plurals name="device_count">
+        <item quantity="one">"%1$d Gerät"</item>
+        <item quantity="other">"%1$d Geräte"</item>
+    </plurals>
 </resources>

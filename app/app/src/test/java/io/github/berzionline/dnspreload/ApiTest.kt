@@ -60,6 +60,11 @@ class ApiTest {
         val st = Api(s.url("/").toString(), "t").stats()
         assertEquals("full", st.lastRun!!.mode); assertEquals(71657L, st.lastRun!!.domains); assertEquals("2026-09-27 04:17", st.lastRun!!.time); s.shutdown()
     }
+    @Test fun tokenNullIsHashOnly() {
+        val s = server(MockResponse().setBody("""{"tokens":[{"id":"1","role":"admin","label":"x","token":null,"created":1,"last_seen":null}]}"""))
+        assertEquals(null, Api(s.url("/").toString(), "t").tokens().single().token); s.shutdown()
+    }
+
     @Test fun tokensParseAndAdd() {
         val s = server(MockResponse().setBody("""{"ok":true,"token":"NEU123","tokens":[{"id":"1","role":"family","label":"Test user","token":"abc","created":1,"last_seen":null},{"id":"2","role":"admin","label":"Test admin","token":"def","created":1,"last_seen":1790490000}]}"""))
         val (tok, list) = Api(s.url("/").toString(), "t").tokenAdd("family", "Test user")

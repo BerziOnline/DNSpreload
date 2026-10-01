@@ -120,6 +120,22 @@ dnspreload-blockmon test                   self-test of the blocking monitor
 - **Switches** are defined in `/etc/dnspreload/switches.json` (see `etc/switches.example.json`): either the whole network (`"mode": "blocking"`) or a Pi-hole group with its devices.
 - **Android app** in [`app/`](app/): `cd app && ./gradlew assembleRelease` (Android SDK, JDK 21). Enter the server address and a token on first start. A ready-made APK can be attached to each release.
 
+## Android app
+
+| Status | Blocking | Statistics | Caching | Suggestions |
+|:---:|:---:|:---:|:---:|:---:|
+| <img src="docs/screenshots/status.png" width="160"> | <img src="docs/screenshots/blocking.png" width="160"> | <img src="docs/screenshots/statistics.png" width="160"> | <img src="docs/screenshots/caching.png" width="160"> | <img src="docs/screenshots/suggestions.png" width="160"> |
+
+- **Status** – is the resolver up, how many answers came straight from the cache today, when the last preload ran. Admins also hand out and revoke app access here.
+- **Blocking** – your switches: the whole network or a Pi-hole group (e.g. the kids' tablets). "Off for 30 min / 2 h" turns itself back on; Pi-hole's own timer is the second safety net.
+- **Statistics** – what blocking stopped (streak, last 14 days, top devices) and what preloading did: share of instant answers and response-time bands.
+- **Suggestions** – candidates from the blocking monitor. Allow, block, dismiss or decide later; nothing changes without your tap.
+- **Widget and quick-settings tile** – switch the main blocker from the home screen or the notification shade.
+
+Two roles: an **admin** token sees all four tabs, a **family** token only the Blocking tab with the switches that list `"family"` in their `roles`. The app talks only to your own server. No analytics, no third-party services, the only permission is `INTERNET`.
+
+Screenshots show demo data. They are rendered from the app's code by a test (`ReadmeShots.kt`, `./gradlew testDebugUnitTest -Proborazzi.test.record=true`), so they stay in sync with the UI.
+
 ## Upgrading from v1
 
 v1 (the Bash scripts) is kept as release v1.0 (see [Releases](../../releases)). v2 does not use any v1 files: remove the old cron jobs, then run `install.sh`.

@@ -58,7 +58,7 @@
     <string name="streak_hint">"Consecutive days with blocked queries."</string>
     <string name="streak_days">"days in a row"</string>
     <string name="record_day">"Record day"</string>
-    <string name="since_start">"Since launch (25 Sep)"</string>
+    <string name="since_start">"Since %1$s"</string>
     <string name="last_14_days">"Last 14 days"</string>
     <string name="yesterday">"Yesterday"</string>
     <string name="ranking_today">"Today’s ranking"</string>
@@ -132,16 +132,24 @@
     <string name="average_ms">"%1$s ms on average"</string>
     <string name="times_count">"%1$d ×"</string>
     <string name="milliseconds">"%1$s ms"</string>
+    <string name="review_intro_raw">"Candidates collected every 6 h without AI, from your own query log. You decide."</string>
     <string name="review_intro">"Candidates collected every 6 h without AI; reviewed nightly by a language model%1$s. %2$d await review, %3$d were discarded as irrelevant."</string>
     <string name="review_as_of">" (as of %1$s)"</string>
-    <string name="suggestion_count">"%1$d suggestions"</string>
     <string name="if_blocked">"If blocked: %1$s"</string>
     <string name="recommendation">"Recommendation: %1$s"</string>
     <string name="review_confidence">"  ·  %1$s  ·  %2$d %% confident"</string>
     <string name="review_revisions">"  ·  rechecked %1$d×"</string>
-    <string name="candidate_counts">"%1$d devices · %2$d queries · %3$s"</string>
+    <string name="candidate_counts">"%1$d queries · %2$s"</string>
     <string name="list_separator">" · "</string>
     <string name="quick_off_until">"OFF · back on at %1$s"</string>
     <string name="tile_off_until">"off until %1$s"</string>
     <string name="server_error">"Server: %1$d"</string>
+    <plurals name="suggestion_count">
+        <item quantity="one">"%1$d suggestion"</item>
+        <item quantity="other">"%1$d suggestions"</item>
+    </plurals>
+    <plurals name="device_count">
+        <item quantity="one">"%1$d device"</item>
+        <item quantity="other">"%1$d devices"</item>
+    </plurals>
 </resources>

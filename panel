@@ -554,8 +554,11 @@ def reviewed_blocking():
     try: d = json.loads((STATE / "blockmon.json").read_text())
     except (OSError, ValueError): d = {}
     try: rv = json.loads((STATE / "blockmon-review.json").read_text()).get("reviews", {})
-    except (OSError, ValueError): rv = {}
+    except (OSError, ValueError): rv = None   # no reviewer installed: show the raw candidates
     out = {"time": d.get("time"), "reviewed_at": None, "over": [], "under": [], "pending": 0, "dropped": 0}
+    if rv is None:
+        for kind in ("over", "under"): out[kind] = [{**x, "review": None} for x in d.get(kind, [])]
+        return out
     try: out["reviewed_at"] = (STATE / "blockmon-review.json").stat().st_mtime
     except OSError: pass
     for kind in ("over", "under"):
