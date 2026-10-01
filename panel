@@ -191,6 +191,7 @@ DE = {
     "Bookmark this page.": "Diese Seite als Lesezeichen speichern.",
     "If blocked: ": "Bei Sperre: ",
     " · Score {score}": " · Punkte {score}",
+    "Devices: ": "Geräte: ",
     "none yet": "noch keine",
     "Candidates {ts} · Review {rts} · ": "Kandidaten {ts} · Einordnung {rts} · ",
     "back": "zurück",
@@ -566,8 +567,18 @@ def reviewed_blocking():
             r = rv.get(x["domain"])
             if not r or r.get("kind") != kind: out["pending"] += 1; continue
             if r.get("verdict") == "drop": out["dropped"] += 1; continue
-            out[kind].append({**x, "review": {k: r.get(k) for k in ("purpose", "category", "if_blocked", "recommendation", "confidence", "reason", "model", "revisions", "ts")}})
+            out[kind].append({**x, "review": {k: r.get(k) for k in ("purpose", "category", "if_blocked", "recommendation", "confidence", "reason", "device_note", "model", "revisions", "ts")}})
     return out
+
+def device_label(dv):
+    """Short device name from Pi-hole (host part only), else the IP."""
+    nm = (dv.get("name") or "").strip()
+    return nm.split(".")[0] if nm and not re.fullmatch(r"[0-9.:a-f]+", nm) else (dv.get("ip") or "?")
+
+
+def device_list(devs):
+    return ", ".join(f"{device_label(dv)} ({dv.get('queries', 0)}×)" for dv in devs)
+
 
 def blocking_page():
     """Blocking-monitor suggestions with domain actions; no alerts or main-panel counter."""
@@ -579,7 +590,9 @@ def blocking_page():
         rv = x.get("review") or {}
         rec = {"allow": _('Recommendation: allow'), "deny": _('Recommendation: block'), "keep": _('Recommendation: keep as is')}.get(rv.get("recommendation"), "")
         why = (f"<li><b>{html.escape(rv.get('purpose') or '')}</b> <i>({html.escape(rv.get('category') or '')})</i></li><li>{_('If blocked: ')}{html.escape(rv.get('if_blocked') or '')}</li><li>{rec} — {html.escape(rv.get('reason') or '')}</li>" if rv else "")
+        if rv.get("device_note"): why += f"<li>{html.escape(rv['device_note'])}</li>"
         why += "".join(f"<li class=obs>{html.escape(w)}</li>" for w in x["why"])
+        if x.get("devices"): why += f"<li class=obs>{_('Devices: ')}{html.escape(device_list(x['devices']))}</li>"
         meta = _('{devices} devices · {queries} queries').format(devices=x.get('clients', 0), queries=x.get('queries', 0)) + (_(' · Lists {lists}').format(lists=x['lists']) if x.get("lists") else "")
         b = (("allow", _('Allow'), "ok"), ("dismiss", _('Dismiss'), ""), ("later", _('Later'), "")) if x["kind"] == "over" else (("deny", _('Block'), "warn"), ("dismiss", _('Dismiss'), ""), ("later", _('Later'), ""))
         btns = "".join(f"<button name=d value={v} class='{c}'>{t}</button>" for v, t, c in b)

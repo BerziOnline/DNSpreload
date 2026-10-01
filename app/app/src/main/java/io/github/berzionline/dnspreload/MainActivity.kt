@@ -336,7 +336,9 @@ fun CandidateCard(c: Candidate, vm: AppState, action: String, actionLabel: Strin
                 Text(stringResource(R.string.review_confidence, it.category, (it.confidence * 100).toInt()) + (if (it.revisions > 0) stringResource(R.string.review_revisions, it.revisions) else ""), color = Muted, fontSize = 12.sp)
             }
             Text(it.reason, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
+            if (it.deviceNote.isNotBlank()) Text(it.deviceNote, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
         }
+        if (c.devices.isNotEmpty()) Text(stringResource(R.string.devices_line, c.devices.joinToString(stringResource(R.string.list_separator)) { d -> "${d.label} (${d.queries}×)" }), color = Fg, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
         Text(pluralStringResource(R.plurals.device_count, c.clients, c.clients) + stringResource(R.string.list_separator) + stringResource(R.string.candidate_counts, c.queries, c.why.joinToString(stringResource(R.string.list_separator))), color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

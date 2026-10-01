@@ -133,6 +133,7 @@
     <string name="times_count">"%1$d ×"</string>
     <string name="milliseconds">"%1$s ms"</string>
     <string name="review_intro_raw">"Candidates collected every 6 h without AI, from your own query log. You decide."</string>
+    <string name="devices_line">"Devices: %1$s"</string>
     <string name="review_intro">"Candidates collected every 6 h without AI; reviewed nightly by a language model%1$s. %2$d await review, %3$d were discarded as irrelevant."</string>
     <string name="review_as_of">" (as of %1$s)"</string>
     <string name="if_blocked">"If blocked: %1$s"</string>

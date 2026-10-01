@@ -133,6 +133,7 @@
     <string name="times_count">"%1$d ×"</string>
     <string name="milliseconds">"%1$s ms"</string>
     <string name="review_intro_raw">"Kandidaten alle 6 h ohne KI aus dem eigenen Anfrage-Log ermittelt. Du entscheidest."</string>
+    <string name="devices_line">"Geräte: %1$s"</string>
     <string name="review_intro">"Kandidaten alle 6 h ohne KI; Einordnung nachts durch ein Sprachmodell%1$s. %2$d warten noch auf Einordnung, %3$d als unsinnig aussortiert."</string>
     <string name="review_as_of">" (Stand %1$s)"</string>
     <string name="if_blocked">"Bei Sperre: %1$s"</string>

@@ -60,6 +60,12 @@ class ApiTest {
         val st = Api(s.url("/").toString(), "t").stats()
         assertEquals("full", st.lastRun!!.mode); assertEquals(71657L, st.lastRun!!.domains); assertEquals("2026-09-27 04:17", st.lastRun!!.time); s.shutdown()
     }
+    @Test fun blockingParsesDevicesAndNote() {
+        val s = server(MockResponse().setBody("""{"over":[{"domain":"a.example","kind":"over","score":40,"why":[],"clients":2,"queries":9,"devices":[{"ip":"192.0.2.20","name":"tv-living.home.arpa","queries":7},{"ip":"192.0.2.21","name":"","queries":2}],"review":{"purpose":"p","category":"api","if_blocked":"x","recommendation":"allow","confidence":0.8,"reason":"r","device_note":"only the TV","model":"m","revisions":0,"ts":1}}],"under":[]}"""))
+        val c = Api(s.url("/").toString(), "t").blocking().over.single()
+        assertEquals(listOf("tv-living", "192.0.2.21"), c.devices.map { it.label }); assertEquals("only the TV", c.review?.deviceNote); s.shutdown()
+    }
+
     @Test fun tokenNullIsHashOnly() {
         val s = server(MockResponse().setBody("""{"tokens":[{"id":"1","role":"admin","label":"x","token":null,"created":1,"last_seen":null}]}"""))
         assertEquals(null, Api(s.url("/").toString(), "t").tokens().single().token); s.shutdown()

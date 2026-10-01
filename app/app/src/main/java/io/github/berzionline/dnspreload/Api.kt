@@ -16,8 +16,12 @@ data class Stats(val piholeQueries: Long, val piholeBlocked: Long, val piholePer
                  val speed: List<Pair<String, Double>>, val lists: Map<String, Long>, val lastRun: LastRun?, val history: List<Pair<String, Long>>)
 data class LastRun(val mode: String, val time: String, val domains: Long, val durationS: Double)
 data class Token(val id: String, val role: String, val label: String, val token: String?, val created: Long?, val lastSeen: Long?)
-data class Review(val purpose: String, val category: String, val ifBlocked: String, val recommendation: String, val confidence: Double, val reason: String, val model: String, val revisions: Int, val ts: Long?)
-data class Candidate(val domain: String, val kind: String, val score: Int, val why: List<String>, val clients: Int, val queries: Int, val review: Review?)
+data class Review(val purpose: String, val category: String, val ifBlocked: String, val recommendation: String, val confidence: Double, val reason: String, val model: String, val revisions: Int, val ts: Long?, val deviceNote: String = "")
+/** A device that asked for a candidate domain; name comes from Pi-hole, may be empty. */
+data class Asker(val ip: String, val name: String, val queries: Int) {
+    val label: String get() = name.trim().takeIf { it.isNotEmpty() && !Regex("[0-9.:a-f]+").matches(it) }?.substringBefore('.') ?: ip
+}
+data class Candidate(val domain: String, val kind: String, val score: Int, val why: List<String>, val clients: Int, val queries: Int, val review: Review?, val devices: List<Asker> = emptyList())
 data class Blocking(val over: List<Candidate>, val under: List<Candidate>, val time: Long?, val reviewedAt: Long?, val pending: Int, val dropped: Int)
 
 // UI callers resolve this resource using their current Android context.
@@ -64,8 +68,8 @@ class Api(baseUrl: String, private val token: String?, client: OkHttpClient? = n
     }
     fun blocking(): Blocking {
         val o = get("/api/v1/blocking")
-        fun rv(c: JSONObject): Review? = c.optJSONObject("review")?.let { r -> Review(r.optString("purpose"), r.optString("category"), r.optString("if_blocked"), r.optString("recommendation"), r.optDouble("confidence", 0.0), r.optString("reason"), r.optString("model"), r.optInt("revisions"), if (r.isNull("ts")) null else r.optLong("ts")) }
-        fun list(k: String) = (o.optJSONArray(k) ?: JSONArray()).let { a -> (0 until a.length()).map { i -> val c = a.getJSONObject(i); Candidate(c.getString("domain"), c.optString("kind", k), c.optInt("score"), c.optJSONArray("why")?.let { w -> (0 until w.length()).map(w::getString) } ?: emptyList(), c.optInt("clients"), c.optInt("queries"), rv(c)) } }
+        fun rv(c: JSONObject): Review? = c.optJSONObject("review")?.let { r -> Review(r.optString("purpose"), r.optString("category"), r.optString("if_blocked"), r.optString("recommendation"), r.optDouble("confidence", 0.0), r.optString("reason"), r.optString("model"), r.optInt("revisions"), if (r.isNull("ts")) null else r.optLong("ts"), if (r.isNull("device_note")) "" else r.optString("device_note")) }
+        fun list(k: String) = (o.optJSONArray(k) ?: JSONArray()).let { a -> (0 until a.length()).map { i -> val c = a.getJSONObject(i); Candidate(c.getString("domain"), c.optString("kind", k), c.optInt("score"), c.optJSONArray("why")?.let { w -> (0 until w.length()).map(w::getString) } ?: emptyList(), c.optInt("clients"), c.optInt("queries"), rv(c), c.optJSONArray("devices")?.let { d -> (0 until d.length()).map { j -> d.getJSONObject(j).let { dv -> Asker(dv.optString("ip"), dv.optString("name"), dv.optInt("queries")) } } } ?: emptyList()) } }
         return Blocking(list("over"), list("under"), if (o.has("time") && !o.isNull("time")) o.optLong("time") else null, if (o.has("reviewed_at") && !o.isNull("reviewed_at")) o.optLong("reviewed_at") else null, o.optInt("pending"), o.optInt("dropped"))
     }
     fun daystats(): JSONObject = get("/api/v1/daystats")

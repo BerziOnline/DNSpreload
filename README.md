@@ -29,7 +29,7 @@ v1 was a set of Bash scripts that fired the top domains at unbound once a night.
 - **Survives restarts.** The cache is dumped every 6 hours and on stop, and loaded on start; right after boot your network's own names are refreshed first.
 - **Web panel.** Cache size, hit rate, response times, last runs, blocking statistics – mobile-friendly, English or German.
 - **Switches.** Turn the ad blocker off for 30 min or 2 h – for the whole network or for a group of devices – with automatic switch-back.
-- **Blocking monitor.** Deterministically finds domains that are probably blocked by mistake (broken apps retry, ad beacons don't) or trackers that slipped through. Suggestions only; you decide.
+- **Blocking monitor.** Deterministically finds domains that are probably blocked by mistake (broken apps retry, ad beacons don't) or trackers that slipped through. Each suggestion lists the devices that asked for it (names from Pi-hole, otherwise the IP) – often the quickest hint what a domain is for. Suggestions only; you decide.
 - **Android app.** Status, switches with countdown, home-screen widget, quick-settings tile, statistics and the blocking suggestions – with role-based tokens (admin / family).
 - **Everything is a setting.** One commented `config.env`, no code changes needed.
 
@@ -129,7 +129,7 @@ dnspreload-blockmon test                   self-test of the blocking monitor
 - **Status** – is the resolver up, how many answers came straight from the cache today, when the last preload ran. Admins also hand out and revoke app access here.
 - **Blocking** – your switches: the whole network or a Pi-hole group (e.g. the kids' tablets). "Off for 30 min / 2 h" turns itself back on; Pi-hole's own timer is the second safety net.
 - **Statistics** – what blocking stopped (streak, last 14 days, top devices) and what preloading did: share of instant answers and response-time bands.
-- **Suggestions** – candidates from the blocking monitor. Allow, block, dismiss or decide later; nothing changes without your tap.
+- **Suggestions** – candidates from the blocking monitor. Allow, block, dismiss or decide later; nothing changes without your tap. Each card shows which devices asked.
 - **Widget and quick-settings tile** – switch the main blocker from the home screen or the notification shade.
 
 Two roles: an **admin** token sees all four tabs, a **family** token only the Blocking tab with the switches that list `"family"` in their `roles`. The app talks only to your own server. No analytics, no third-party services, the only permission is `INTERNET`.

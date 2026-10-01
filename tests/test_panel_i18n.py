@@ -232,3 +232,16 @@ def test_blocking_with_reviewer_keeps_gating(tmp_path, monkeypatch):
     m = load_panel(tmp_path, monkeypatch, "en")
     d = m.reviewed_blocking()
     assert all(x["review"] is not None for x in d["over"] + d["under"])
+
+
+@pytest.mark.parametrize("lang,label", [("en", "Devices: "), ("de", "Geräte: ")])
+def test_blocking_page_lists_devices(tmp_path, monkeypatch, lang, label):
+    synthetic_state(tmp_path)
+    p = tmp_path / "state" / "blockmon.json"
+    d = json.loads(p.read_text())
+    d["over"][0]["devices"] = [{"ip": "192.0.2.20", "name": "tv-living.home.arpa", "queries": 40},
+                               {"ip": "192.0.2.21", "name": "", "queries": 3}]
+    p.write_text(json.dumps(d))
+    m = load_panel(tmp_path, monkeypatch, lang)
+    html = m.blocking_page()
+    assert f"{label}tv-living (40×), 192.0.2.21 (3×)" in html

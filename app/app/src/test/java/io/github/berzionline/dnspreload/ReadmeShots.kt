@@ -40,6 +40,7 @@ class ReadmeShots {
     private fun arr(vararg o: JSONObject) = JSONArray().apply { o.forEach { put(it) } }
     private fun obj(vararg p: Pair<String, Any?>) = JSONObject().apply { p.forEach { (k, v) -> put(k, v ?: JSONObject.NULL) } }
     private fun dev(ip: String, name: String, icon: String) = obj("ip" to ip, "name" to name, "icon" to icon)
+    private fun dev2(ip: String, name: String, q: Int) = obj("ip" to ip, "name" to name, "queries" to q)
 
     private fun body(path: String): String = when {
         path.startsWith("/api/v1/switches") -> obj("role" to "admin", "switches" to arr(
@@ -75,8 +76,8 @@ class ReadmeShots {
                     "record_day" to obj("day" to "2026-10-01", "hit_percent" to 97.9)))
         }
         path.startsWith("/api/v1/blocking") -> obj("time" to now - 3600, "reviewed_at" to null, "pending" to 0, "dropped" to 0,
-            "over" to arr(obj("domain" to "cdn.weather-example.com", "kind" to "over", "score" to 7, "why" to JSONArray(listOf("newly blocked", "retried 40×")), "clients" to 3, "queries" to 212)),
-            "under" to arr(obj("domain" to "telemetry.tv-example.net", "kind" to "under", "score" to 6, "why" to JSONArray(listOf("telemetry name", "every 30 s")), "clients" to 1, "queries" to 2880)))
+            "over" to arr(obj("domain" to "cdn.weather-example.com", "kind" to "over", "score" to 7, "why" to JSONArray(listOf("newly blocked", "retried 40×")), "clients" to 3, "queries" to 212, "devices" to arr(dev2("192.168.1.30", "Living-room TV", 150), dev2("192.168.1.41", "Tablet 1", 40), dev2("192.168.1.22", "Phone", 22)))),
+            "under" to arr(obj("domain" to "telemetry.tv-example.net", "kind" to "under", "score" to 6, "why" to JSONArray(listOf("telemetry name", "every 30 s")), "clients" to 1, "queries" to 2880, "devices" to arr(dev2("192.168.1.30", "Living-room TV", 2880)))))
         path.startsWith("/api/v1/tokens") -> obj("tokens" to arr(
             obj("id" to "a1", "role" to "admin", "label" to "My phone", "token" to "k7Qm2vXb9TzR4wLp", "created" to now - 86400 * 30, "last_seen" to now - 60),
             obj("id" to "f1", "role" to "family", "label" to "Kids' tablet", "token" to null, "created" to now - 86400 * 9, "last_seen" to now - 7200)))

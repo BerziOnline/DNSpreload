@@ -178,8 +178,17 @@ def scan(now=None, ftl=FTL_DB, gravity=GRAVITY_DB, ultimate=None, out=None):
         if in_set_or_parent(dom, ult): sc += 40; why.append(_("listed in Hagezi ULTIMATE (stricter than our lists)"))
         if ADWORDS.search(dom) and not lists_for(g, dom): sc += 30; why.append(_("advertising/tracking word in the name, absent from all lists"))
         if sc: under[dom] = {"score": sc + min(20, c * 2), "why": why, "queries": n, "clients": c, "lists": []}
+    t7 = int(now - 7 * 86400)
+    def devices(dom, kind):
+        """Top devices that asked for the domain (7 days; blocked answers for 'over', normal ones for 'under')."""
+        st = BLOCKED if kind == "over" else OK
+        return [{"ip": ip, "name": nm or "", "queries": n} for ip, nm, n in con.execute(f"""SELECT c.ip, c.name, COUNT(*) n FROM query_storage q JOIN domain_by_id d ON d.id=q.domain
+            JOIN client_by_id c ON c.id=q.client WHERE d.domain=? AND q.timestamp>=? AND q.status IN {st} AND {EXCL.replace('client NOT IN', 'q.client NOT IN')}
+            GROUP BY c.id ORDER BY n DESC LIMIT 5""", (dom, t7))]
     def pack(d, kind):
-        return sorted([{"domain": k, "kind": kind, **v} for k, v in d.items() if v["score"] >= 30 and not muted(dec, k, now)], key=lambda x: -x["score"])[:60]
+        res = sorted([{"domain": k, "kind": kind, **v} for k, v in d.items() if v["score"] >= 30 and not muted(dec, k, now)], key=lambda x: -x["score"])[:60]
+        for x in res: x["devices"] = devices(x["domain"], kind)
+        return res
     res = {"time": now, "gravity_updated": gup, "over": pack(over, "over"), "under": pack(under, "under"), "ultimate_loaded": bool(ult)}
     if out is not False:
         STATE.mkdir(parents=True, exist_ok=True); p = out or (STATE / "blockmon.json"); tmp = p.with_suffix(".tmp"); tmp.write_text(json.dumps(res, indent=1, ensure_ascii=False)); os.replace(tmp, p)
@@ -262,7 +271,9 @@ def test():
     checks += [("dismiss suppresses candidate", "googleads.googleapis.com" not in o2), ("later returns after 14 days", "cdn.brokenapp.io" in o2),
                ("Blocked+allowed domain never underblocked", "graph.social.com" not in under),
                ("Continuous requests not suggested as a broken app", "fire.telemetry-heavy.com" not in over),
-               ("No domain in both lists", not (set(over) & set(under)))]
+               ("No domain in both lists", not (set(over) & set(under))),
+               ("Devices listed per candidate", [x["ip"] for x in over["cdn.brokenapp.io"]["devices"]] == ["192.0.2.20"] and {x["ip"] for x in under["pixel.tracker-x.net"]["devices"]} == {"192.0.2.20", "192.0.2.21"}),
+               ("System clients never listed as devices", all(dv["ip"] != "192.0.2.99" for x in r["over"] + r["under"] for dv in x["devices"]))]
     bad = [n for n, ok in checks if not ok]
     for n, ok in checks: print(("ok  " if ok else "FAIL"), n)
     print(f"{len(checks)-len(bad)}/{len(checks)} passed"); return 1 if bad else 0
